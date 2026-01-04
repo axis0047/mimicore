@@ -8,19 +8,22 @@ import (
 	"github.com/axis0047/mockingGOD/internal/ir"
 )
 
-type RawConfig struct {
-	Method   string         `json:"method"`
-	Path     string         `json:"path"`
-	Response map[string]any `json:"response"`
+type Adapter struct {
+	Path string
 }
 
-func Compile(path string) ([]ir.Route, error) {
-	raw, err := os.ReadFile(path)
+func (a *Adapter) Compile() ([]ir.Route, error) {
+	raw, err := os.ReadFile(a.Path)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfgs []RawConfig
+	var cfgs []struct {
+		Method   string         `json:"method"`
+		Path     string         `json:"path"`
+		Response map[string]any `json:"response"`
+	}
+
 	if err := json.Unmarshal(raw, &cfgs); err != nil {
 		return nil, err
 	}

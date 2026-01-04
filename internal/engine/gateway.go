@@ -3,14 +3,28 @@ package engine
 import (
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 )
 
 type Gateway struct {
-	Router *Router
+	router atomic.Value // holds *Router
+}
+
+func NewGateway(initial *Router) *Gateway {
+	g := &Gateway{}
+	g.router.Store(initial)
+	return g
+}
+
+// SwapRouter atomically replaces the active router
+func (g *Gateway) SwapRouter(r *Router) {
+	g.router.Store(r)
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	route, params := g.Router.Match(r)
+	router := g.router.Load().(*Router)
+
+	route, params := router.Match(r)
 	if route == nil {
 		http.NotFound(w, r)
 		return

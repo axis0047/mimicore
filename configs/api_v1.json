@@ -1,9 +1,17 @@
 [
   {
-    "method": "POST",
-    "path": "/ping",
+    "method": "GET",
+    "path": "/users/{id}",
     "response": {
-      "message": "pong"
+      "userId": "static-for-now-and-then"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/doser",
+    "request": {},
+    "response": {
+      "userId": "static-for-now-and-then-don"
     }
   }
 ]
