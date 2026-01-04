@@ -9,9 +9,15 @@
   {
     "method": "POST",
     "path": "/doser",
-    "request": {},
+    "request": {
+      "malle": "int",
+      "pol": {}
+    },
     "response": {
-      "userId": "static-for-now-and-then-don"
+      "userId": "static-for-now-and-then-don",
+      "doserId": {
+        "serId": "hikshikshiks"
+      }
     }
   }
 ]
