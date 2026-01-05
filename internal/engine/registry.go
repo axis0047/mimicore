@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"sync/atomic"
 )
 
@@ -19,8 +20,15 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Get(api string) (APIHandler, bool) {
-	m := r.value.Load().(map[string]APIHandler)
+	loaded := r.value.Load()
+	fmt.Printf("Loaded value: %+v, Type: %T\n", loaded, loaded)
+
+	m := loaded.(map[string]APIHandler)
+	fmt.Printf("Map contents: %+v\n", m)
+	fmt.Printf("Looking for key: %q\n", api)
+
 	h, ok := m[api]
+	fmt.Printf("get function - %v - %v\n", h, ok)
 	return h, ok
 }
 

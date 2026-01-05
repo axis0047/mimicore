@@ -1,9 +1,9 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func LoadAll(dir string) ([]APIConfig, error) {
@@ -15,17 +15,19 @@ func LoadAll(dir string) ([]APIConfig, error) {
 	var apis []APIConfig
 
 	for _, f := range files {
-		raw, err := os.ReadFile(f)
-		if err != nil {
+		// Skip if the file doesn't exist or can't be read
+		if _, err := os.Stat(f); os.IsNotExist(err) {
 			continue
 		}
 
-		var cfg APIConfig
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			continue
-		}
+		// Derive API name from filename (without extension)
+		apiName := strings.TrimSuffix(filepath.Base(f), ".json")
 
-		apis = append(apis, cfg)
+		apis = append(apis, APIConfig{
+			API:        apiName,
+			Mode:       ModeIR,
+			RoutesFile: f,
+		})
 	}
 
 	return apis, nil
