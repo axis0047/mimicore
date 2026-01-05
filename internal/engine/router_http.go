@@ -1,9 +1,10 @@
 package engine
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/axis0047/mockingGOD/internal/utils" // <-- Import utils
 )
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -27,11 +28,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			log.Printf("error resolving %s: %v", rule.Target, err)
 			val = "error: " + err.Error()
 		}
-		SetNested(resp, rule.Target, val)
+		// Use the correct SetNested from the utils package
+		utils.SetNested(resp, rule.Target, val)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Println("failed to write response:", err)
-	}
+	// Use the helper function for consistency
+	utils.WriteJSON(w, http.StatusOK, resp)
 }
