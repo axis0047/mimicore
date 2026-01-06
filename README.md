@@ -1,12 +1,14 @@
 
 ***
 
-# MockingGOD
+# 🌀 MockingGOD
+
+![mockinggod is an lovecraftian abomination who is able to disort the reality by projecting the illusion of everything is being fine](mockinggod.png)
 
 **MockingGOD** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution and allows features such as zero-downtime hot-reloading, upstream proxying, and dynamic user code execution via WebAssembly (WASM).
 A variation of this project serves as the core for [mocc.dev](http://mocc.dev) which is an API mocking platform. This is the open source version of it.
 
-## Important Note
+## ⚠️ Important Note
 I mainly work with Python and C/C++ and Go is new to me. I built with support of AI assistants and online resources. You can see traces of it in old commits. Since this project has user code execution and API chaining; those features can be used for malicious intentions. If you are planning to use this project for running untrusted code use with caution and double check all code for erronous and exploitable code. It is recommended to run this in a restricted enviorment like Docker or hardend kernal. And use a DMZ for hosting this. This project here is intended for demonstration and testing purposes only. 
 
 ## 🚀 Key Features
