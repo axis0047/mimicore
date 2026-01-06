@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
+	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
 )
 
-// EnhancedRouter handles v2 routes with validation, transformation, and WASM support
 type EnhancedRouter struct {
 	Routes []ir.EnhancedRoute
-	Wasm   *wasm.Manager // <--- Added this field
+	Wasm   *wasm.Manager
 }
 
 func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -32,13 +32,12 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Matched route: %s %s", route.Method, strings.Join(route.Path.Segments, "/"))
 
-	// Build context
 	ctx := map[string]any{}
 	for k, v := range params {
 		ctx[k] = v
 	}
 
-	// Phase 1: Validation
+	// Phase 1: Validation (RESTORED)
 	if err := r.runValidation(route, req); err != nil {
 		log.Printf("Validation failed: %v", err)
 		utils.WriteError(w, http.StatusBadRequest, err.Error())
@@ -55,17 +54,13 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Phase 3: Response building
 	resp := make(map[string]any)
 	for _, rule := range route.Response {
-		// Check if source is a template string "{{...}}"
 		if static, ok := rule.Source.(ir.StaticValue); ok {
 			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
-				// Resolve template (includes WASM function calls)
 				finalVal := r.resolveTemplate(strVal, ctx)
 				utils.SetNested(resp, rule.Target, finalVal)
 				continue
 			}
 		}
-
-		// Fallback for standard resolution
 		val, err := rule.Source.Resolve(ctx)
 		if err != nil {
 			log.Printf("error resolving %s: %v", rule.Target, err)
@@ -94,11 +89,44 @@ func (r *EnhancedRouter) matchRoute(req *http.Request) (*ir.EnhancedRoute, map[s
 	return nil, nil
 }
 
+// --- RESTORED LOGIC ---
 func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Request) error {
 	if len(route.ValidationSteps) == 0 {
 		return nil
 	}
-	// Note: You can re-add the specific header/query validation logic here from previous steps
+
+	for _, step := range route.ValidationSteps {
+		switch step.Type {
+		case "header":
+			rules, ok := step.Rules.(v2.ValidationRule)
+			if !ok {
+				// Safety check for pointer vs value
+				if ptr, okPtr := step.Rules.(*v2.ValidationRule); okPtr {
+					rules = *ptr
+				} else {
+					return fmt.Errorf("invalid rule type for header %s", step.Field)
+				}
+			}
+
+			val := req.Header.Get(step.Field)
+
+			// Required check
+			if rules.Required && val == "" {
+				return fmt.Errorf("header %q is required", step.Field)
+			}
+
+			// Pattern check
+			if rules.Pattern != "" && val != "" {
+				matched, err := regexp.MatchString(rules.Pattern, val)
+				if err != nil {
+					return fmt.Errorf("invalid regex for %s", step.Field)
+				}
+				if !matched {
+					return fmt.Errorf("header %q value does not match pattern", step.Field)
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -142,7 +170,14 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 		value = req.URL.Query().Get(key)
 	}
 
-	ctx[extractCfg.To] = value
+	// Logging to verify extraction
+	if value != "" {
+		ctx[extractCfg.To] = value
+		log.Printf("EXTRACT: %s -> ctx[%s] = %s", extractCfg.From, extractCfg.To, value)
+	} else {
+		log.Printf("EXTRACT WARNING: %s was empty", extractCfg.From)
+	}
+
 	return nil
 }
 
@@ -158,6 +193,11 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 		return err
 	}
 
+	// Add headers from config
+	for k, v := range cfg.Headers {
+		req.Header.Set(k, r.resolveTemplate(v, ctx))
+	}
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -166,9 +206,15 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
+
 	var result any
-	json.Unmarshal(bodyBytes, &result)
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		// If not JSON, store as string
+		result = string(bodyBytes)
+	}
+
 	ctx[cfg.Name] = result
+	log.Printf("HTTP CALL: %s -> Status %d", finalURL, resp.StatusCode)
 
 	return nil
 }
@@ -201,12 +247,14 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx map[string]any) st
 					continue
 				}
 
-				// Resolve arg (might be a variable name)
 				resolved := r.resolveVariable(rawArg, ctx)
 
-				// Convert to uint64
-				intVal, err := strconv.ParseUint(fmt.Sprintf("%v", resolved), 10, 64)
+				// Ensure resolved is string before parsing
+				strVal := fmt.Sprintf("%v", resolved)
+
+				intVal, err := strconv.ParseUint(strVal, 10, 64)
 				if err != nil {
+					log.Printf("WASM Arg Error: '%s' (resolved from %s) is not int", strVal, rawArg)
 					return "[error: arg not int]"
 				}
 				wasmArgs = append(wasmArgs, intVal)
@@ -226,11 +274,9 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx map[string]any) st
 }
 
 func (r *EnhancedRouter) resolveVariable(key string, ctx map[string]any) any {
-	// Direct
 	if val, ok := ctx[key]; ok {
 		return val
 	}
-	// Nested
 	if strings.Contains(key, ".") {
 		parts := strings.Split(key, ".")
 		if len(parts) == 2 {
@@ -241,5 +287,5 @@ func (r *EnhancedRouter) resolveVariable(key string, ctx map[string]any) any {
 			}
 		}
 	}
-	return key // Return literal if not found
+	return key
 }

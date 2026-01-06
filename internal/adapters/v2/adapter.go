@@ -115,12 +115,18 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 
 	var steps []ir.TransformStep
 
-	for varName, rule := range transform.Extract {
+	for mapKey, rule := range transform.Extract {
+		// FIX: Use the 'as' field (rule.To) if provided, otherwise fallback to mapKey
+		targetVar := rule.To
+		if targetVar == "" {
+			targetVar = mapKey
+		}
+
 		steps = append(steps, ir.TransformStep{
 			Type: "extract",
 			Config: ir.ExtractTransform{
 				From: rule.From,
-				To:   varName,
+				To:   targetVar, // Use the correct variable name
 			},
 		})
 	}
