@@ -1,13 +1,11 @@
 package v2
 
-// V2RouteConfig represents the enhanced route configuration
 type V2RouteConfig struct {
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Validate  *ValidationConfig `json:"validate,omitempty"`
 	Transform *TransformConfig  `json:"transform,omitempty"`
 	Response  ResponseConfig    `json:"response"`
-	Handler   *WASMHandler      `json:"handler,omitempty"`
 }
 
 type ValidationConfig struct {
@@ -18,15 +16,13 @@ type ValidationConfig struct {
 
 type ValidationRule struct {
 	Required bool     `json:"required"`
-	Type     string   `json:"type"` // "string", "number", "email", etc.
 	Pattern  string   `json:"pattern,omitempty"`
 	Min      *float64 `json:"min,omitempty"`
 	Max      *float64 `json:"max,omitempty"`
-	Enum     []string `json:"enum,omitempty"`
 }
 
 type BodyValidation struct {
-	Schema string `json:"schema"` // JSON Schema reference or inline
+	Schema string `json:"schema"`
 }
 
 type TransformConfig struct {
@@ -36,9 +32,9 @@ type TransformConfig struct {
 }
 
 type ExtractRule struct {
-	From string `json:"from"` // "header.X-User-ID", "body.user.name", "query.id"
-	As   string `json:"as"`   // Variable name in context
-	Type string `json:"type"` // Optional type conversion
+	From string `json:"from"`
+	To   string `json:"as"`
+	Type string `json:"type"`
 }
 
 type HTTPCallConfig struct {
@@ -47,7 +43,7 @@ type HTTPCallConfig struct {
 	Method  string            `json:"method"`
 	Headers map[string]string `json:"headers,omitempty"`
 	Body    interface{}       `json:"body,omitempty"`
-	Timeout int               `json:"timeout"` // milliseconds
+	Timeout int               `json:"timeout"`
 }
 
 type WASMCallConfig struct {
@@ -58,12 +54,26 @@ type WASMCallConfig struct {
 }
 
 type ResponseConfig struct {
-	Status  int                    `json:"status,omitempty"` // Default 200
+	Status  int                    `json:"status,omitempty"`
 	Headers map[string]string      `json:"headers,omitempty"`
 	Body    map[string]interface{} `json:"body"`
 }
 
-type WASMHandler struct {
-	Module   string `json:"module"`
-	Function string `json:"function"`
+// UserCodeConfig defines dynamic user code settings
+type UserCodeConfig struct {
+	InlineSource string `json:"inline_source,omitempty"` // Raw Go code
+	Filepath     string `json:"source,omitempty"`        // Fallback file path
+	TimeoutMs    int    `json:"timeout_ms"`
+	MaxMemoryMB  int    `json:"max_memory_mb"`
+	MinInstances int    `json:"min_instances"`
+	MaxInstances int    `json:"max_instances"`
+}
+
+// APIFileConfig represents the full JSON file structure
+type APIFileConfig struct {
+	API      string          `json:"api"`
+	Mode     string          `json:"mode"`
+	Version  string          `json:"version"`
+	UserCode *UserCodeConfig `json:"user_code,omitempty"`
+	Routes   []V2RouteConfig `json:"routes"`
 }
