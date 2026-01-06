@@ -2,13 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"time"
 
 	v1 "github.com/axis0047/mockingGOD/internal/adapters/v1"
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/config"
 	"github.com/axis0047/mockingGOD/internal/engine"
+	"github.com/axis0047/mockingGOD/internal/services/compiler"
+	"github.com/axis0047/mockingGOD/internal/services/wasm"
 )
 
 func buildHandlers(configDir string) (map[string]engine.APIHandler, error) {
@@ -46,7 +50,6 @@ func buildHandlers(configDir string) (map[string]engine.APIHandler, error) {
 }
 
 func buildIRHandler(api config.APIConfig) (engine.APIHandler, error) {
-	// Determine version (default to v1 for backward compatibility)
 	version := api.Version
 	if version == "" {
 		version = "v1"
@@ -68,34 +71,78 @@ func buildV1Handler(api config.APIConfig) (engine.APIHandler, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	router := &engine.Router{Routes: routes}
 	return &engine.IRHandler{Router: router}, nil
 }
 
 func buildV2Handler(api config.APIConfig) (engine.APIHandler, error) {
-	var routes []map[string]interface{}
-
-	// V2 can load from file or inline routes
-	if api.RoutesFile != "" {
-		// Load from file
-		raw, err := os.ReadFile(api.RoutesFile)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(raw, &routes); err != nil {
-			return nil, err
-		}
-	} else {
-		// Use inline routes
-		routes = api.Routes
-	}
-
-	enhancedRoutes, err := v2.Compile(routes)
+	// 1. Read the config file
+	raw, err := os.ReadFile(api.RoutesFile)
 	if err != nil {
 		return nil, err
 	}
 
-	router := &engine.EnhancedRouter{Routes: enhancedRoutes}
+	// 2. Unmarshal strictly into the new Object format
+	// This drops support for root-level arrays.
+	var fullCfg v2.APIFileConfig
+	if err := json.Unmarshal(raw, &fullCfg); err != nil {
+		return nil, fmt.Errorf("invalid v2 config (must be object with 'routes'): %w", err)
+	}
+
+	var wasmMgr *wasm.Manager
+
+	// 3. Handle User Code (WASM)
+	if fullCfg.UserCode != nil {
+		var wasmBytes []byte
+
+		// Option A: Inline Source (Compiles dynamically)
+		if fullCfg.UserCode.InlineSource != "" {
+			log.Printf("[%s] Compiling inline user code...", api.API)
+			startTime := time.Now()
+
+			wasmBytes, err = compiler.CompileWASM(fullCfg.UserCode.InlineSource)
+			if err != nil {
+				return nil, fmt.Errorf("user code compilation failed: %w", err)
+			}
+			log.Printf("[%s] Compilation success (%s)", api.API, time.Since(startTime))
+
+		} else if fullCfg.UserCode.Filepath != "" {
+			// Option B: Pre-compiled file
+			wasmBytes, err = os.ReadFile(fullCfg.UserCode.Filepath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read wasm file: %w", err)
+			}
+		}
+
+		// Initialize WASM Manager if we have binary data
+		if len(wasmBytes) > 0 {
+			poolSize := fullCfg.UserCode.MinInstances
+			if poolSize < 1 {
+				poolSize = 1
+			}
+
+			wasmMgr, err = wasm.NewManager(wasm.Config{
+				Binary:   wasmBytes,
+				Timeout:  time.Duration(fullCfg.UserCode.TimeoutMs) * time.Millisecond,
+				PoolSize: poolSize,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to init wasm manager: %w", err)
+			}
+		}
+	}
+
+	// 4. Compile Routes
+	// fullCfg.Routes is already type []v2.V2RouteConfig, so this matches the new signature
+	enhancedRoutes, err := v2.Compile(fullCfg.Routes)
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Create Router
+	router := &engine.EnhancedRouter{
+		Routes: enhancedRoutes,
+		Wasm:   wasmMgr,
+	}
 	return &engine.EnhancedIRHandler{Router: router}, nil
 }
