@@ -10,23 +10,14 @@ import (
 	"github.com/axis0047/mockingGOD/internal/ir"
 )
 
-// Compile converts V2 config to enhanced IR
-func Compile(routes []map[string]interface{}) ([]ir.EnhancedRoute, error) {
+// Compile now accepts []V2RouteConfig directly
+func Compile(routes []V2RouteConfig) ([]ir.EnhancedRoute, error) {
 	var enhancedRoutes []ir.EnhancedRoute
 
-	for _, routeData := range routes {
-		// Parse into structured config
-		routeJSON, err := json.Marshal(routeData)
-		if err != nil {
-			return nil, fmt.Errorf("marshal route: %w", err)
-		}
+	for _, cfg := range routes {
+		// No need to unmarshal/marshal anymore, we have the struct
 
-		var cfg V2RouteConfig
-		if err := json.Unmarshal(routeJSON, &cfg); err != nil {
-			return nil, fmt.Errorf("unmarshal route: %w", err)
-		}
-
-		// Build base route (same as v1)
+		// Build base route
 		baseRoute := buildBaseRoute(cfg)
 
 		// Build validation steps
@@ -45,19 +36,25 @@ func Compile(routes []map[string]interface{}) ([]ir.EnhancedRoute, error) {
 	return enhancedRoutes, nil
 }
 
-// CompileFile reads v2 config from file (for backward compat with routes_file)
+// CompileFile reads v2 config from file (Legacy helper)
 func CompileFile(path string) ([]ir.EnhancedRoute, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var routes []map[string]interface{}
-	if err := json.Unmarshal(raw, &routes); err != nil {
-		return nil, err
+	// We unmarshal into the struct now, not map[string]interface{}
+	var fileCfg APIFileConfig // Using the struct from config.go
+	if err := json.Unmarshal(raw, &fileCfg); err != nil {
+		// Fallback: try unmarshalling just the array if it's not the full object
+		var routes []V2RouteConfig
+		if err2 := json.Unmarshal(raw, &routes); err2 != nil {
+			return nil, fmt.Errorf("unmarshal failed: %w", err)
+		}
+		return Compile(routes)
 	}
 
-	return Compile(routes)
+	return Compile(fileCfg.Routes)
 }
 
 func buildBaseRoute(cfg V2RouteConfig) ir.Route {
@@ -65,16 +62,15 @@ func buildBaseRoute(cfg V2RouteConfig) ir.Route {
 
 	log.Printf("  Building base route: %s %s -> segments: %v", cfg.Method, cfg.Path, segs)
 
-	// Build response rules from v2 response config
 	var rules []ir.ResponseRule
 	for k, v := range cfg.Response.Body {
 		// Check if value contains template syntax {{...}}
 		if str, ok := v.(string); ok && strings.Contains(str, "{{") {
-			// This is a dynamic value - use ContextValue
-			varName := extractVarName(str)
+			// This is a dynamic value - store as StaticValue containing the template string.
+			// The EnhancedRouter will detect the "{{" and resolve it at runtime.
 			rules = append(rules, ir.ResponseRule{
 				Target: k,
-				Source: ir.ContextValue{Key: varName},
+				Source: ir.StaticValue{Value: str},
 			})
 		} else {
 			// Static value
@@ -88,7 +84,7 @@ func buildBaseRoute(cfg V2RouteConfig) ir.Route {
 	return ir.Route{
 		Method:     cfg.Method,
 		Path:       ir.PathTemplate{Segments: segs},
-		Validators: nil,
+		Validators: nil, // Validators are handled in EnhancedRouter via ValidationSteps
 		Response:   rules,
 	}
 }
@@ -100,7 +96,6 @@ func buildValidationSteps(validate *ValidationConfig) []ir.ValidationStep {
 
 	var steps []ir.ValidationStep
 
-	// Header validations
 	for field, rule := range validate.Headers {
 		steps = append(steps, ir.ValidationStep{
 			Type:  "header",
@@ -109,24 +104,7 @@ func buildValidationSteps(validate *ValidationConfig) []ir.ValidationStep {
 		})
 	}
 
-	// Query validations
-	for field, rule := range validate.Query {
-		steps = append(steps, ir.ValidationStep{
-			Type:  "query",
-			Field: field,
-			Rules: rule,
-		})
-	}
-
-	// Body validation
-	if validate.Body != nil {
-		steps = append(steps, ir.ValidationStep{
-			Type:  "body",
-			Field: "",
-			Rules: validate.Body,
-		})
-	}
-
+	// Add other validations (Query, Body) here if needed in future
 	return steps
 }
 
@@ -137,7 +115,6 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 
 	var steps []ir.TransformStep
 
-	// Extract steps
 	for varName, rule := range transform.Extract {
 		steps = append(steps, ir.TransformStep{
 			Type: "extract",
@@ -148,7 +125,6 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 		})
 	}
 
-	// HTTP call steps
 	for _, httpCall := range transform.HTTP {
 		steps = append(steps, ir.TransformStep{
 			Type: "http",
@@ -163,29 +139,5 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 		})
 	}
 
-	// WASM call steps
-	for _, wasmCall := range transform.WASM {
-		steps = append(steps, ir.TransformStep{
-			Type: "wasm",
-			Config: ir.WASMTransform{
-				Name:     wasmCall.Name,
-				Module:   wasmCall.Module,
-				Function: wasmCall.Function,
-				Args:     wasmCall.Args,
-			},
-		})
-	}
-
 	return steps
-}
-
-// extractVarName extracts variable name from template string
-// "{{user_id}}" -> "user_id"
-func extractVarName(template string) string {
-	start := strings.Index(template, "{{")
-	end := strings.Index(template, "}}")
-	if start == -1 || end == -1 {
-		return template
-	}
-	return strings.TrimSpace(template[start+2 : end])
 }
