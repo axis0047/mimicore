@@ -1,10 +1,12 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+
+	// Replace standard json with go-json
+	json "github.com/goccy/go-json"
 )
 
 func LoadAll(dir string) ([]APIConfig, error) {
@@ -21,7 +23,7 @@ func LoadAll(dir string) ([]APIConfig, error) {
 		}
 
 		apiName := strings.TrimSuffix(filepath.Base(f), ".json")
-		version := detectVersion(f) // <--- Logic updated below
+		version := detectVersion(f)
 
 		apis = append(apis, APIConfig{
 			API:        apiName,
@@ -41,7 +43,6 @@ func detectVersion(path string) string {
 	}
 
 	// 1. Try parsing as a Generic Map (New Object Format)
-	// If the file starts with '{', it's likely an Object.
 	var obj map[string]interface{}
 	if err := json.Unmarshal(raw, &obj); err == nil {
 		// Check explicit version field
@@ -52,7 +53,6 @@ func detectVersion(path string) string {
 		if _, ok := obj["routes"]; ok {
 			return "v2"
 		}
-		// Fallback for objects
 		return "v1"
 	}
 

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,18 +11,21 @@ import (
 	"strings"
 	"time"
 
+	// Replace standard json with go-json
+	json "github.com/goccy/go-json"
+
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
 )
 
-// --- NEW: Shared HTTP Client for Connection Pooling ---
+// Shared Client (From previous step)
 var sharedHTTPClient = &http.Client{
 	Transport: &http.Transport{
-		MaxIdleConns:        100,              // Keep 100 connections open total
-		MaxIdleConnsPerHost: 20,               // Keep 20 connections open per upstream host
-		IdleConnTimeout:     90 * time.Second, // Close connections if unused for 90s
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
 	},
 }
 
@@ -178,6 +180,7 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 }
 
 // --- UPDATED HTTP HANDLER ---
+// Update handleHTTP to use the new fast JSON parser
 func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) error {
 	cfg, ok := step.Config.(ir.HTTPTransform)
 	if !ok {
@@ -186,30 +189,24 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 
 	finalURL := r.resolveTemplate(cfg.URL, ctx)
 
-	// Create request with Context
-	// We use the context for cancellation/timeout, but the client is shared
 	req, err := http.NewRequest(cfg.Method, finalURL, nil)
 	if err != nil {
 		return err
 	}
 
-	// Add headers from config
 	for k, v := range cfg.Headers {
 		req.Header.Set(k, r.resolveTemplate(v, ctx))
 	}
 
-	// Set Timeout via Context
-	timeout := 5000 // default 5s
+	timeout := 5000
 	if cfg.Timeout > 0 {
 		timeout = cfg.Timeout
 	}
 	ctxReq, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
-	// Associate context with request
 	req = req.WithContext(ctxReq)
 
-	// Use SHARED Client
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -219,6 +216,7 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 	bodyBytes, _ := io.ReadAll(resp.Body)
 
 	var result any
+	// This Unmarshal is now powered by goccy/go-json (CPU efficient)
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
 		result = string(bodyBytes)
 	}
