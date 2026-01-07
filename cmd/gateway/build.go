@@ -1,11 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"time"
+
+	// Replace standard json with go-json
+	json "github.com/goccy/go-json"
 
 	v1 "github.com/axis0047/mockingGOD/internal/adapters/v1"
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
@@ -133,7 +135,6 @@ func buildV2Handler(api config.APIConfig) (engine.APIHandler, error) {
 	}
 
 	// 4. Compile Routes
-	// fullCfg.Routes is already type []v2.V2RouteConfig, so this matches the new signature
 	enhancedRoutes, err := v2.Compile(fullCfg.Routes)
 	if err != nil {
 		return nil, err
