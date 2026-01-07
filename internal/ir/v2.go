@@ -1,33 +1,29 @@
 package ir
 
-// Enhanced route with v2 features
 type EnhancedRoute struct {
-	Route // Embed base route
-
-	// V2 additions
+	Route
 	ValidationSteps []ValidationStep
 	TransformSteps  []TransformStep
 }
 
 type ValidationStep struct {
-	Type  string      // "header", "query", "body"
-	Field string      // Field name
-	Rules interface{} // Validation rules
+	Type  string
+	Field string
+	Rules interface{}
 }
 
 type TransformStep struct {
-	Type   string      // "extract", "http", "wasm"
-	Config interface{} // Specific config
+	Type   string // "extract", "http_batch" (UPDATED), "wasm"
+	Config interface{}
 }
 
-// Extract transformation
+// ExtractTransform remains the same...
 type ExtractTransform struct {
-	From   string // Source path
-	To     string // Target variable
-	Parser string // Optional parser
+	From string
+	To   string
 }
 
-// HTTP call transformation
+// HTTPTransform remains the same...
 type HTTPTransform struct {
 	Name    string
 	URL     string
@@ -37,7 +33,12 @@ type HTTPTransform struct {
 	Timeout int
 }
 
-// WASM call transformation
+// NEW: Wrapper for parallel calls
+type ParallelHTTPConfig struct {
+	Calls []HTTPTransform
+}
+
+// WASMTransform remains the same...
 type WASMTransform struct {
 	Name     string
 	Module   string

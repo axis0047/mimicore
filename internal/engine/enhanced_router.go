@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
-	// Replace standard json with go-json
+	// High-performance JSON library
 	json "github.com/goccy/go-json"
+	// For parallel execution
+	"golang.org/x/sync/errgroup"
 
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
@@ -20,7 +22,7 @@ import (
 	"github.com/axis0047/mockingGOD/internal/utils"
 )
 
-// Shared Client (From previous step)
+// Shared Client for Connection Pooling
 var sharedHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		MaxIdleConns:        100,
@@ -44,9 +46,12 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Matched route: %s %s", route.Method, strings.Join(route.Path.Segments, "/"))
 
-	ctx := map[string]any{}
+	// Initialize Thread-Safe Context
+	ctx := NewSafeContext()
+
+	// Seed context with path parameters
 	for k, v := range params {
-		ctx[k] = v
+		ctx.Set(k, v)
 	}
 
 	// Phase 1: Validation
@@ -56,7 +61,7 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Phase 2: Transformation
+	// Phase 2: Transformation (Passes SafeContext)
 	if err := r.runTransformations(route, req, ctx); err != nil {
 		log.Printf("Transformation failed: %v", err)
 		utils.WriteError(w, http.StatusInternalServerError, err.Error())
@@ -66,13 +71,17 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Phase 3: Response building
 	resp := make(map[string]any)
 	for _, rule := range route.Response {
+		// Check for Template Strings {{...}}
 		if static, ok := rule.Source.(ir.StaticValue); ok {
 			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
+				// Resolve template using SafeContext
 				finalVal := r.resolveTemplate(strVal, ctx)
 				utils.SetNested(resp, rule.Target, finalVal)
 				continue
 			}
 		}
+
+		// Standard Resolution (SafeContext implements ContextAccessor interface)
 		val, err := rule.Source.Resolve(ctx)
 		if err != nil {
 			log.Printf("error resolving %s: %v", rule.Target, err)
@@ -109,21 +118,26 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 	for _, step := range route.ValidationSteps {
 		switch step.Type {
 		case "header":
-			rules, ok := step.Rules.(v2.ValidationRule) // Implicit dependency on adapter/v2
-			// Safety check in case rules is a pointer or map (depending on adapter version)
+			rules, ok := step.Rules.(v2.ValidationRule)
 			if !ok {
-				// We assume rules are correct type for now or handle generic checking
-				// Ideally engine shouldn't depend on v2 adapter types directly but for this MVP it's fine
-				// If strictly decoupled, ValidationSteps should use engine-specific struct
-				return nil
+				if ptr, okPtr := step.Rules.(*v2.ValidationRule); okPtr {
+					rules = *ptr
+				} else {
+					return fmt.Errorf("invalid rule type for header %s", step.Field)
+				}
 			}
 
 			val := req.Header.Get(step.Field)
+
 			if rules.Required && val == "" {
 				return fmt.Errorf("header %q is required", step.Field)
 			}
+
 			if rules.Pattern != "" && val != "" {
-				matched, _ := regexp.MatchString(rules.Pattern, val)
+				matched, err := regexp.MatchString(rules.Pattern, val)
+				if err != nil {
+					return fmt.Errorf("invalid regex for %s", step.Field)
+				}
 				if !matched {
 					return fmt.Errorf("header %q value does not match pattern", step.Field)
 				}
@@ -133,15 +147,16 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 	return nil
 }
 
-func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.Request, ctx map[string]any) error {
+func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.Request, ctx *SafeContext) error {
 	for _, step := range route.TransformSteps {
 		switch step.Type {
 		case "extract":
 			if err := r.handleExtract(step, req, ctx); err != nil {
 				return err
 			}
-		case "http":
-			if err := r.handleHTTP(step, ctx); err != nil {
+		case "http_batch":
+			// Execute HTTP calls in parallel
+			if err := r.handleHTTPBatch(step, ctx); err != nil {
 				return err
 			}
 		}
@@ -149,7 +164,7 @@ func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.R
 	return nil
 }
 
-func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request, ctx map[string]any) error {
+func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request, ctx *SafeContext) error {
 	extractCfg, ok := step.Config.(ir.ExtractTransform)
 	if !ok {
 		return fmt.Errorf("invalid config for extract step")
@@ -166,7 +181,7 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 	case "header":
 		value = req.Header.Get(key)
 	case "path":
-		if val, exists := ctx[key]; exists {
+		if val, exists := ctx.Get(key); exists {
 			value = fmt.Sprintf("%v", val)
 		}
 	case "query":
@@ -174,19 +189,39 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 	}
 
 	if value != "" {
-		ctx[extractCfg.To] = value
+		ctx.Set(extractCfg.To, value)
+		log.Printf("EXTRACT: %s -> ctx[%s] = %s", extractCfg.From, extractCfg.To, value)
 	}
 	return nil
 }
 
-// --- UPDATED HTTP HANDLER ---
-// Update handleHTTP to use the new fast JSON parser
-func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) error {
-	cfg, ok := step.Config.(ir.HTTPTransform)
+func (r *EnhancedRouter) handleHTTPBatch(step ir.TransformStep, ctx *SafeContext) error {
+	batchCfg, ok := step.Config.(ir.ParallelHTTPConfig)
 	if !ok {
-		return fmt.Errorf("invalid HTTP config")
+		return fmt.Errorf("invalid http batch config")
 	}
 
+	// Create ErrorGroup to manage goroutines
+	g, _ := errgroup.WithContext(context.Background())
+
+	for _, cfg := range batchCfg.Calls {
+		// Capture loop variable for closure
+		httpConfig := cfg
+
+		g.Go(func() error {
+			return r.performSingleHTTP(httpConfig, ctx)
+		})
+	}
+
+	// Wait for all to finish
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *EnhancedRouter) performSingleHTTP(cfg ir.HTTPTransform, ctx *SafeContext) error {
+	// 1. Resolve Templates safely
 	finalURL := r.resolveTemplate(cfg.URL, ctx)
 
 	req, err := http.NewRequest(cfg.Method, finalURL, nil)
@@ -198,15 +233,17 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 		req.Header.Set(k, r.resolveTemplate(v, ctx))
 	}
 
+	// 2. Setup Timeout
 	timeout := 5000
 	if cfg.Timeout > 0 {
 		timeout = cfg.Timeout
 	}
 	ctxReq, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Millisecond)
 	defer cancel()
-
 	req = req.WithContext(ctxReq)
 
+	// 3. Execute with Shared Client
+	start := time.Now()
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -216,23 +253,24 @@ func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) e
 	bodyBytes, _ := io.ReadAll(resp.Body)
 
 	var result any
-	// This Unmarshal is now powered by goccy/go-json (CPU efficient)
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
 		result = string(bodyBytes)
 	}
 
-	ctx[cfg.Name] = result
-	log.Printf("HTTP CALL: %s -> Status %d", finalURL, resp.StatusCode)
+	// 4. Write Result SAFELY
+	ctx.Set(cfg.Name, result)
+	log.Printf("HTTP CALL (Async): %s -> Status %d (took %v)", finalURL, resp.StatusCode, time.Since(start))
 
 	return nil
 }
 
-func (r *EnhancedRouter) resolveTemplate(template string, ctx map[string]any) string {
+func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) string {
 	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
 
 	return re.ReplaceAllStringFunc(template, func(match string) string {
 		content := strings.TrimSpace(match[2 : len(match)-2])
 
+		// 1. Function Call Detection: name(args)
 		funcRe := regexp.MustCompile(`^(\w+)\((.*)\)$`)
 		funcMatch := funcRe.FindStringSubmatch(content)
 
@@ -270,21 +308,34 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx map[string]any) st
 			return fmt.Sprintf("%d", result)
 		}
 
+		// 2. Variable Lookup
 		val := r.resolveVariable(content, ctx)
 		return fmt.Sprintf("%v", val)
 	})
 }
 
-func (r *EnhancedRouter) resolveVariable(key string, ctx map[string]any) any {
-	if val, ok := ctx[key]; ok {
+func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) any {
+	// Direct safe lookup
+	if val, ok := ctx.Get(key); ok {
 		return val
 	}
+
+	// Nested lookup
 	if strings.Contains(key, ".") {
 		parts := strings.Split(key, ".")
 		if len(parts) == 2 {
-			if root, ok := ctx[parts[0]].(map[string]any); ok {
-				if subVal, ok := root[parts[1]]; ok {
-					return subVal
+			if root, ok := ctx.Get(parts[0]); ok {
+				// We expect root to be a map
+				if rootMap, ok := root.(map[string]any); ok {
+					if subVal, ok := rootMap[parts[1]]; ok {
+						return subVal
+					}
+				}
+				// Handle generic interface{} map from JSON unmarshal
+				if rootMap, ok := root.(map[string]interface{}); ok {
+					if subVal, ok := rootMap[parts[1]]; ok {
+						return subVal
+					}
 				}
 			}
 		}

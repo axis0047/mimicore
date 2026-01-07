@@ -97,12 +97,12 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 
 	var steps []ir.TransformStep
 
+	// 1. Extract Steps (Sequential)
 	for mapKey, rule := range transform.Extract {
 		targetVar := rule.To
 		if targetVar == "" {
 			targetVar = mapKey
 		}
-
 		steps = append(steps, ir.TransformStep{
 			Type: "extract",
 			Config: ir.ExtractTransform{
@@ -112,16 +112,39 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 		})
 	}
 
-	for _, httpCall := range transform.HTTP {
-		steps = append(steps, ir.TransformStep{
-			Type: "http",
-			Config: ir.HTTPTransform{
+	// 2. HTTP Steps (BATCHED for Parallelism)
+	if len(transform.HTTP) > 0 {
+		var batch []ir.HTTPTransform
+
+		for _, httpCall := range transform.HTTP {
+			batch = append(batch, ir.HTTPTransform{
 				Name:    httpCall.Name,
 				URL:     httpCall.URL,
 				Method:  httpCall.Method,
 				Headers: httpCall.Headers,
 				Body:    httpCall.Body,
 				Timeout: httpCall.Timeout,
+			})
+		}
+
+		// Add as a single step
+		steps = append(steps, ir.TransformStep{
+			Type: "http_batch", // New Type
+			Config: ir.ParallelHTTPConfig{
+				Calls: batch,
+			},
+		})
+	}
+
+	// 3. WASM (Currently sequential, could be batched similarly if needed)
+	for _, wasmCall := range transform.WASM {
+		steps = append(steps, ir.TransformStep{
+			Type: "wasm",
+			Config: ir.WASMTransform{
+				Name:     wasmCall.Name,
+				Module:   wasmCall.Module,
+				Function: wasmCall.Function,
+				Args:     wasmCall.Args,
 			},
 		})
 	}

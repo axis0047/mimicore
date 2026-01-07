@@ -1,8 +1,7 @@
 package engine
 
 import (
-	"fmt"
-	"sync/atomic"
+	"sync"
 )
 
 type APIHandler interface {
@@ -10,32 +9,41 @@ type APIHandler interface {
 }
 
 type Registry struct {
-	value atomic.Value // map[string]APIHandler
+	mu       sync.RWMutex
+	handlers map[string]APIHandler
 }
 
 func NewRegistry() *Registry {
-	r := &Registry{}
-	r.value.Store(map[string]APIHandler{})
-	return r
+	return &Registry{
+		handlers: make(map[string]APIHandler),
+	}
 }
 
+// Get Read-Locking
 func (r *Registry) Get(api string) (APIHandler, bool) {
-	loaded := r.value.Load()
-	fmt.Printf("Loaded value: %+v, Type: %T\n", loaded, loaded)
-
-	m := loaded.(map[string]APIHandler)
-	fmt.Printf("Map contents: %+v\n", m)
-	fmt.Printf("Looking for key: %q\n", api)
-
-	h, ok := m[api]
-	fmt.Printf("get function - %v - %v\n", h, ok)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	h, ok := r.handlers[api]
 	return h, ok
 }
 
-func (r *Registry) Swap(next map[string]APIHandler) {
-	r.value.Store(next)
+// Register (Write-Locking): Updates or Adds a single handler
+func (r *Registry) Register(api string, handler APIHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.handlers[api] = handler
 }
 
+// Remove (Write-Locking): Removes a single handler
+func (r *Registry) Remove(api string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.handlers, api)
+}
+
+// ReplaceAll (Legacy support for initial load)
 func (r *Registry) ReplaceAll(next map[string]APIHandler) {
-	r.value.Store(next)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.handlers = next
 }
