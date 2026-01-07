@@ -122,29 +122,29 @@ graph TD
     User[Client Request] --> Gateway
     Watcher[File Watcher] --> Builder
     
-    subgraph Compiler Service
-        Builder -->|Go Source| Compiler
-        Compiler -->|Check Hash| L1_Memory[L1 Memory Cache]
-        Compiler -->|Check Hash| L2_S3[L2 MinIO/S3]
-        Compiler -->|Compile (TinyGo)| WASM_Bin
+    subgraph Compiler_Service [Compiler Service]
+        Builder -- "Go Source" --> Compiler
+        Compiler -- "Check Hash" --> L1_Memory[L1 Memory Cache]
+        Compiler -- "Check Hash" --> L2_S3[L2 MinIO/S3]
+        Compiler -- "Compile (TinyGo)" --> WASM_Bin
         WASM_Bin --> L2_S3
     end
     
-    Compiler -->|WASM Bytes| Builder
+    Compiler -- "WASM Bytes" --> Builder
     Builder --> Registry[Handler Registry]
     
-    Gateway -->|Host Matching| Registry
-    Registry -->|Get Handler| V2Engine
+    Gateway -- "Host Matching" --> Registry
+    Registry -- "Get Handler" --> V2Engine
     
     subgraph V2Engine [Parallel Request Lifecycle]
         Validation[JSON Schema / Headers] --> Transformation
-        Transformation -->|Extract| Context
-        Transformation -->|ErrGroup: Parallel HTTP| Upstream[Upstream APIs]
-        Transformation -->|WASM (Pooled)| Runtime[Wazero Runtime]
+        Transformation -- "Extract" --> Context
+        Transformation -- "ErrGroup: Parallel HTTP" --> Upstream[Upstream APIs]
+        Transformation -- "WASM (Pooled)" --> Runtime[Wazero Runtime]
         Upstream --> Context
         Runtime --> Context
         Context --> ResponseBuilder
-        ResponseBuilder -->|Latency Simulation| User
+        ResponseBuilder -- "Latency Simulation" --> User
     end
 ```
 
