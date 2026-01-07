@@ -1,188 +1,139 @@
-***
-
 # MockingGOD V2 Configuration Guide
 
-This document describes the structure and valid parameters for the API configuration files (e.g., `configs/api_name.json`).
+This document describes the structure and parameters for the V2 API configuration files.
 
-## 1. File Structure Overview
+## 1. Root Configuration
 
-The configuration file is a single JSON Object containing metadata, dynamic code settings, and a list of routes.
+| Key | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `api` | `string` | **Yes** | Unique ID. Maps to Host header (e.g., `api.localhost`). |
+| `mode` | `string` | **Yes** | `"ir"` (Mocking Engine) or `"proxy"`. |
+| `version` | `string` | **Yes** | Must be `"v2"`. |
+| `user_code` | `Object` | No | Dynamic code settings. |
+| `routes` | `Array` | **Yes** | List of endpoint definitions. |
+
+## 2. User Code (WASM) Configuration
+**Key:** `user_code`
+
+MockingGOD automatically handles memory allocation between Go and WASM. You simply write the logic.
+
+| Key | Description |
+| :--- | :--- |
+| `inline_source` | Raw Golang code. **Must be escaped** (`\n`). Requires `package main`. |
+| `timeout_ms` | Max execution time per function call. |
+| `min_instances` | Number of hot WASM instances to keep in the pool. |
+
+### How to write User Code
+1.  **Integers:** Use `func add(x, y uint64) uint64`. Call via `{{add(var1, var2)}}`.
+2.  **Strings/JSON:** Use `func process(ptr *byte, size uint32) uint64`. Call via `{{process(var_json)}}`.
+    *   *Note:* The system automatically injects `_guest_alloc` helpers. You do not need to write `malloc` yourself anymore.
+
+## 3. Route Configuration
+
+| Key | Description |
+| :--- | :--- |
+| `validate` | Input validation rules. |
+| `transform` | Data extraction and Upstream calls. |
+| `delay` | Network latency simulation. |
+| `response` | The response definition. |
+
+### 3.1 Validation
+**Key:** `validate`
+
+*   **Headers/Query:** Regex pattern matching.
+*   **Body:** **Full JSON Schema** support.
 
 ```json
-{
-  "api": "my_service",
-  "mode": "ir",
-  "version": "v2",
-  "user_code": { ... },
-  "routes": [ ... ]
+"validate": {
+  "headers": { "Authorization": { "required": true, "pattern": "^Bearer .+" } },
+  "body": {
+    "schema": {
+      "type": "object",
+      "required": ["age"],
+      "properties": { "age": { "type": "integer", "minimum": 18 } }
+    }
+  }
+}
+```
+
+### 3.2 Latency Simulation
+**Key:** `delay`
+
+Simulate network issues before sending the response.
+
+*   `fixed_ms`: Base delay in milliseconds.
+*   `jitter_ms`: Random additional delay (0 to `jitter_ms`).
+
+```json
+"delay": { "fixed_ms": 200, "jitter_ms": 100 }
+```
+
+### 3.3 Transformation
+**Key:** `transform`
+
+*   **Extract:** Pull data from `path`, `query`, `header`, or `body`.
+*   **HTTP:** Make upstream calls. **Note:** All HTTP calls in this list run in **PARALLEL**.
+
+```json
+"transform": {
+  "extract": { "my_input": { "from": "body", "as": "input_json" } },
+  "http": [
+    { "name": "service_a", "url": "http://a.com", "method": "GET" },
+    { "name": "service_b", "url": "http://b.com", "method": "GET" }
+  ]
+}
+```
+
+### 3.4 Response
+**Key:** `response`
+
+Use `{{ }}` templates to inject data from extraction, upstream calls, or WASM results.
+
+```json
+"response": {
+  "status": 200,
+  "body": {
+    "data_a": "{{service_a.data}}",
+    "calculated": "{{my_wasm_func(input_json)}}"
+  }
 }
 ```
 
 ---
 
-## 2. Root Parameters
+## 4. Full Example: Advanced Logic
 
-These parameters define the API's identity and operational mode.
-
-| Key | Type | Required | Description |
-| :--- | :--- | :--- | :--- |
-| `api` | `string` | **Yes** | Unique identifier. Maps to the subdomain (e.g., `my_service` -> `my_service.localhost`). |
-| `mode` | `string` | **Yes** | Must be `"ir"` (Intermediate Representation engine) or `"proxy"`. |
-| `version` | `string` | **Yes** | Must be `"v2"` to enable User Code, Validation, and HTTP transforms. |
-| `user_code` | `Object` | No | Settings for dynamic WASM execution. See [Section 3](#3-user-code-configuration). |
-| `routes` | `Array` | **Yes** | List of endpoint definitions. See [Section 4](#4-route-configuration). |
-
----
-
-## 3. User Code Configuration
-**Key:** `user_code`
-
-This section configures the internal WASM runtime for executing custom logic.
-
-| Key | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `inline_source` | `string` | `null` | Raw Golang source code. **Must be escaped** (use `\n` for newlines). Requires `package main` and `//export FuncName`. |
-| `source` | `string` | `null` | Path to a pre-compiled `.wasm` file (if `inline_source` is not used). |
-| `timeout_ms` | `int` | `5000` | Execution timeout in milliseconds per function call. Security against infinite loops. |
-| `min_instances` | `int` | `1` | Number of WASM modules to keep "hot" in the pool (prevents compilation lag). |
-| `max_instances` | `int` | `10` | Maximum concurrent WASM executions allowed. |
-
-**Example Inline Source:**
-```json
-"inline_source": "package main\n\n//export add\nfunc add(x, y uint64) uint64 { return x + y }\n\nfunc main() {}"
-```
-
----
-
-## 4. Route Configuration
-**Key:** `routes` (Array of Objects)
-
-Each object in this array represents a specific API endpoint.
-
-| Key | Type | Required | Description |
-| :--- | :--- | :--- | :--- |
-| `method` | `string` | **Yes** | HTTP Method (e.g., `"GET"`, `"POST"`, `"PUT"`, `"DELETE"`). |
-| `path` | `string` | **Yes** | URL path. Supports dynamic parameters (e.g., `/users/{id}`). |
-| `validate` | `Object` | No | Input validation rules. |
-| `transform` | `Object` | No | Data extraction and upstream logic. |
-| `response` | `Object` | **Yes** | The response definition. |
-
-### 4.1 Validation
-**Key:** `validate`
-
-Enforces rules before processing the request. Returns `400 Bad Request` if failed.
-
-| Subsection | Description |
-| :--- | :--- |
-| `headers` | Map of Header names to [Rule Objects](#rule-object). |
-| `query` | Map of Query Parameter names to [Rule Objects](#rule-object). |
-
-**Rule Object:**
-*   `required` (bool): Fails if the field is missing.
-*   `pattern` (string): Regex string the value must match (e.g., `"^Bearer .+"`).
-
-### 4.2 Transformation
-**Key:** `transform`
-
-Prepares the data **Context** used to build the response.
-
-#### A. Extract (`extract`)
-Pulls data from the request and saves it to variables.
-
-| Key | Description |
-| :--- | :--- |
-| `from` | **Source**. Format: `source.key`.<br>Valid sources: `path`, `query`, `header`.<br>Example: `"path.id"`, `"header.Authorization"`. |
-| `as` | **Variable Name**. The name used to reference this value later via `{{name}}`. |
-| `type` | Optional casting. currently supports `"int"` (for math) or `"string"`. |
-
-#### B. HTTP Calls (`http`)
-Makes requests to other services.
-
-| Key | Description |
-| :--- | :--- |
-| `name` | Variable name to store the JSON response (e.g., `upstream_data`). |
-| `url` | Target URL. Supports templating (e.g., `"http://api.com/{{user_id}}"`). |
-| `method` | HTTP Method (`"GET"`, `"POST"`). |
-| `headers` | Map of headers to send. Supports templating. |
-| `timeout` | Timeout in milliseconds. |
-
-### 4.3 Response
-**Key:** `response`
-
-Defines what is sent back to the client.
-
-| Key | Description |
-| :--- | :--- |
-| `status` | HTTP Status Code (e.g., `200`, `201`, `404`). |
-| `headers` | Response headers map. |
-| `body` | The JSON payload. Values support **Templating**. |
-
----
-
-## 5. Templating & Logic System
-
-MockingGOD uses `{{ }}` syntax to inject dynamic values into `http` configurations and `response` bodies.
-
-### A. Variable Injection
-Injects values saved during the `transform` phase.
-*   **Syntax:** `{{variable_name}}`
-*   **Nested JSON:** `{{upstream_data.user.email}}`
-
-### B. User Code Execution (WASM)
-Calls functions defined in `user_code`.
-*   **Syntax:** `{{function_name(arg1, arg2)}}`
-*   **Example:** `{{multiply(price, tax_rate)}}`
-*   **Constraints:**
-    1.  Arguments must resolve to **Integers**.
-    2.  Go functions must be exported via `//export Name`.
-    3.  Go function signatures must use `uint64`.
-
----
-
-## 6. Full Example Configuration
+This example validates a user via JSON schema, extracts the body, simulates network lag, and processes the JSON using inline Go code.
 
 ```json
 {
-  "api": "store_api",
+  "api": "advanced_api",
   "mode": "ir",
   "version": "v2",
   "user_code": {
-    "inline_source": "package main\n\n//export calculate_total\nfunc calculateTotal(price, tax uint64) uint64 { return price + (price * tax / 100) }\n\nfunc main() {}",
-    "timeout_ms": 100,
-    "min_instances": 2,
-    "max_instances": 5
+    "timeout_ms": 500,
+    "inline_source": "package main\nimport (\n\t\"encoding/json\"\n\t\"unsafe\"\n)\n\ntype User struct { Name string `json:\"name\"` }\ntype Resp struct { Msg string `json:\"msg\"` }\n\n//export greet\nfunc greet(ptr *byte, size uint32) uint64 {\n\t// Boilerplate to read string\n\tbytes := unsafe.Slice(ptr, size)\n\tvar u User\n\tjson.Unmarshal(bytes, &u)\n\t\n\t// Logic\n\tr := Resp{Msg: \"Hello \" + u.Name}\n\tout, _ := json.Marshal(r)\n\t\n\t// Boilerplate to return string\n\tlen := uint32(len(out))\n\tptrOut := uintptr(unsafe.Pointer(&out[0]))\n\treturn (uint64(ptrOut) << 32) | uint64(len)\n}\nfunc main() {}"
   },
   "routes": [
     {
       "method": "POST",
-      "path": "/checkout/{cart_id}",
+      "path": "/greet",
       "validate": {
-        "headers": {
-          "Authorization": { "required": true, "pattern": "^Bearer .+" }
+        "body": {
+          "schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } }
+          }
         }
       },
+      "delay": { "fixed_ms": 150 },
       "transform": {
-        "extract": {
-          "cart": { "from": "path.cart_id", "as": "cid" },
-          "cost": { "from": "query.amount", "as": "amt", "type": "int" },
-          "tax":  { "from": "query.tax_rate", "as": "tax", "type": "int" }
-        },
-        "http": [
-          {
-            "name": "inventory",
-            "url": "https://internal-inventory.local/check/{{cid}}",
-            "method": "GET",
-            "timeout": 200
-          }
-        ]
+        "extract": { "raw": { "from": "body", "as": "input_json" } }
       },
       "response": {
         "status": 200,
-        "body": {
-          "cart_id": "{{cid}}",
-          "stock_status": "{{inventory.status}}",
-          "final_amount": "{{calculate_total(amt, tax)}}"
-        }
+        "body": { "result": "{{greet(input_json)}}" }
       }
     }
   ]

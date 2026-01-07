@@ -1,30 +1,35 @@
-
-***
-
 # 🌀 MockingGOD
 
-**MockingGOD** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution and allows features such as zero-downtime hot-reloading, upstream proxying, and dynamic user code execution via WebAssembly (WASM).
-A variation of this project serves as the core for [mocc.dev](http://mocc.dev) which is an API mocking platform. This is the open source version of it.
+**MockingGOD** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution.
+
+It is designed for scale and developer experience, featuring **zero-downtime hot-reloading**, **upstream proxying**, **parallel execution**, **distributed caching**, and **dynamic user code execution** via WebAssembly (WASM).
+
+A variation of this project serves as the core for [mocc.dev](http://mocc.dev). This is the open-source version.
 
 ## ⚠️ Important Note
-I mainly work with Python and C/C++. Go is new to me. I built with support of AI assistants and online resources. You can see traces of it in old commits. Since this project has user code execution and API chaining; those features can be used for malicious intentions. If you are planning to use this project for running untrusted code use with caution and double check all code for erronous and exploitable code. It is recommended to run this in a restricted enviorment like Docker or hardend kernal. And use a DMZ for hosting this. This project here is intended for demonstration and testing purposes only. 
+I mainly work with Python and C/C++. Go is new to me. I built this with support from AI assistants and online resources. Since this project has **user code execution** and **API chaining**, these features can be misused. If you plan to run untrusted code, use caution and double-check all code for exploits. It is recommended to run this in a restricted environment like Docker or a hardened kernel, behind a DMZ. This project is intended for demonstration and testing purposes.
 
 ## 🚀 Key Features
 
-*   **Declarative Configuration**: Define API endpoints, validation logic, and responses entirely in JSON.
-*   **Zero-Downtime Hot Reload**: Modify configurations or inline code, and the server updates instantly without dropping connections.
-*   **Dynamic User Code (WASM)**: Write Go code directly in your JSON config. It is compiled to WASM on-the-fly and executed securely in a sandboxed runtime.
-*   **Validation**: Enforce headers, query parameters, and patterns (Regex).
-*   **Transformation**: Extract data from paths/headers and use it in responses.
-*   **HTTP Chaining**: Call upstream services and inject their data into your response.
-*   **Runtime Pooling**: Efficient management of WASM instances for high throughput.
-*   **Protocol Support**: HTTP and Unix Socket Proxying for multiple APIs.
+### Core Engine
+*   **Declarative Configuration**: Define endpoints, validation, logic, and responses entirely in JSON.
+*   **Zero-Downtime Hot Reload**: The system detects file changes and recompiles specific routes/WASM binaries without dropping active connections.
+*   **Parallel Execution**: Transformation steps (like upstream HTTP calls) are batched and executed concurrently using `errgroup`.
+*   **High Performance**: Uses `goccy/go-json` for fast parsing and a global connection pool for low-latency HTTP chaining.
+
+### Advanced Capabilities
+*   **Dynamic User Code (WASM)**: Write Go code directly in your JSON. It is compiled to WASM on-the-fly and executed in a sandboxed, pooled runtime (Wazero). Supports complex JSON manipulation.
+*   **Distributed Caching (S3/MinIO)**: Compiled WASM binaries are hashed and stored in S3/MinIO. This enables instant startup for clusters and prevents "thundering herd" compilation spikes.
+*   **Robust Validation**: Full support for **JSON Schema** validation for request bodies, plus Regex patterns for Headers/Query params.
+*   **Network Simulation**: Built-in support for **Fixed Latency** and **Jitter** to simulate real-world network conditions.
+*   **Garbage Collection**: Automatically cleans up orphaned WASM binaries from object storage.
 
 ## 🛠️ Prerequisites
 
 *   **Go 1.22+**
 *   **TinyGo**: Required for the Dynamic Compiler service (to compile inline Go code to WASM).
     *   [Install TinyGo Instructions](https://tinygo.org/getting-started/install/)
+*   **Docker** (Optional): Recommended for running MinIO (S3 Cache).
 
 ## 📦 Installation & Run
 
@@ -39,15 +44,39 @@ I mainly work with Python and C/C++. Go is new to me. I built with support of AI
     go mod tidy
     ```
 
-3.  **Start the Gateway**
+3.  **Start the Gateway** (Standard Mode)
     ```bash
-    go run cmd/gateway/main.go
+    go run cmd/gateway/*.go
     ```
     *Server listens on port `:8080`.*
 
+## 🗄️ S3/MinIO Integration (Recommended)
+
+To enable **Distributed Caching** (skipping compilation on restart) and **Garbage Collection**, run a MinIO instance.
+
+1.  **Start MinIO in Docker:**
+    ```bash
+    docker run -d -p 9000:9000 -p 9001:9001 \
+      --name minio \
+      -e "MINIO_ROOT_USER=admin" \
+      -e "MINIO_ROOT_PASSWORD=password" \
+      minio/minio server /data --console-address ":9001"
+    ```
+
+2.  **Start Gateway with Environment Variables:**
+    ```bash
+    export MINIO_ENDPOINT="localhost:9000"
+    export MINIO_ACCESS_KEY="admin"
+    export MINIO_SECRET_KEY="password"
+    
+    go run cmd/gateway/*.go
+    ```
+
+*On startup, the Gateway will check the bucket for existing WASM binaries matching the code hash. If found, it skips compilation. This is useful for auto scaling or relevant tasks*
+
 ## ⚡ Quick Start
 
-1.  Create a configuration file `configs/my_api.json`:
+1.  Create a configuration file `configs/my_api.json`. Note the use of `inline_source` for custom logic.
 
     ```json
     {
@@ -75,12 +104,11 @@ I mainly work with Python and C/C++. Go is new to me. I built with support of AI
     ```
 
 2.  **Test the Endpoint**:
-    Routing is based on the **Host header** matching the `api` field in your config.
+    Routing is based on the **Host header** matching the `api` field.
 
     ```bash
     curl -H "Host:my_api.localhost" http://localhost:8080/calc/5
     ```
-    You may need to edit /etc/hosts for testing this locally or use wildcard domains with a proxy like Nginx or HAProxy.
 
     **Response:**
     ```json
@@ -93,20 +121,30 @@ I mainly work with Python and C/C++. Go is new to me. I built with support of AI
 graph TD
     User[Client Request] --> Gateway
     Watcher[File Watcher] --> Builder
-    Builder -->|Compile Go| Compiler[TinyGo Service]
-    Compiler -->|WASM Bytes| Builder
+    
+    subgraph Compiler_Service [Compiler Service]
+        Builder -- "Go Source" --> Compiler
+        Compiler -- "Check Hash" --> L1_Memory[L1 Memory Cache]
+        Compiler -- "Check Hash" --> L2_S3[L2 MinIO/S3]
+        Compiler -- "Compile (TinyGo)" --> WASM_Bin
+        WASM_Bin --> L2_S3
+    end
+    
+    Compiler -- "WASM Bytes" --> Builder
     Builder --> Registry[Handler Registry]
     
-    Gateway -->|Host Matching| Registry
-    Registry -->|Get Handler| V2Engine
+    Gateway -- "Host Matching" --> Registry
+    Registry -- "Get Handler" --> V2Engine
     
-    subgraph V2Engine [V2 Request Lifecycle]
-        Validation --> Transformation
-        Transformation -->|Extract Data| Context
-        Transformation -->|HTTP Call| Upstream
-        Transformation -->|WASM Call| WazeroRuntime
-        WazeroRuntime --> Context
+    subgraph V2Engine [Parallel Request Lifecycle]
+        Validation[JSON Schema / Headers] --> Transformation
+        Transformation -- "Extract" --> Context
+        Transformation -- "ErrGroup: Parallel HTTP" --> Upstream[Upstream APIs]
+        Transformation -- "WASM (Pooled)" --> Runtime[Wazero Runtime]
+        Upstream --> Context
+        Runtime --> Context
         Context --> ResponseBuilder
+        ResponseBuilder -- "Latency Simulation" --> User
     end
 ```
 
@@ -114,28 +152,30 @@ graph TD
 
 ```text
 .
-├── cmd/gateway/           # Entry point & Hot-reload logic
+├── cmd/gateway/           # Entry point, Hot-reload, GC, Build orchestration
 ├── configs/               # API JSON Configurations
 ├── internal/
-│   ├── adapters/          # Converts JSON -> IR (Intermediate Representation)
-│   ├── config/            # Config loading & detection
-│   ├── engine/            # The Core Runtime (Router, HTTP, Validation)
-│   ├── ir/                # Struct definitions for the Engine
+│   ├── adapters/          # Config Parsers (V1/V2)
+│   ├── config/            # Loader & Version Detection
+│   ├── engine/            # Core Runtime (Router, HTTP, Validation, SafeContext)
+│   ├── ir/                # Intermediate Representation Definitions
 │   ├── services/
-│   │   ├── compiler/      # Handles dynamic Go -> WASM compilation
-│   │   └── wasm/          # Manages Wazero runtime pool & security
-│   └── utils/             # JSONPath and HTTP helpers
-└── plugins/               # Directory for manual WASM plugins (optional)
+│   │   ├── compiler/      # Dynamic TinyGo Compiler & Hash Logic
+│   │   ├── storage/       # S3/MinIO Client
+│   │   └── wasm/          # Wazero Pool Manager & Memory Bridge
+│   └── utils/             # Helpers
 ```
 
 ## 📚 Documentation
 
-For a detailed guide on all available configuration parameters (Validation, HTTP calls, Extraction rules), please see the **[Configuration Guide](CONFIG_GUIDE.md)**.
+For a detailed guide on the JSON structure, including **JSON Schema Validation**, **WASM String/JSON processing**, and **Delay configuration**, please see the **[Configuration Guide](CONFIG_GUIDE.md)**.
 
 ## 🧪 Testing
 
-Checkout to relevant test branches and run the internal unit tests to verify the engine logic:
+Run unit tests and the End-to-End (E2E) test suite which compiles a real binary and hits it with requests, Use test/ branches for this:
 
 ```bash
-go test ./internal/engine/... -v
+go test ./... -v
 ```
+
+***

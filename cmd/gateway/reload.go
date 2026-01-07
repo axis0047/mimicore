@@ -2,11 +2,11 @@ package main
 
 import (
 	"log"
-	"time"
-
-	"github.com/fsnotify/fsnotify"
+	"path/filepath"
+	"strings"
 
 	"github.com/axis0047/mockingGOD/internal/engine"
+	"github.com/fsnotify/fsnotify"
 )
 
 func watchConfigs(dir string, registry *engine.Registry) {
@@ -20,30 +20,52 @@ func watchConfigs(dir string, registry *engine.Registry) {
 		log.Fatal(err)
 	}
 
-	var debounce *time.Timer
-
-	reload := func() {
-		handlers, err := buildHandlers(dir)
-		if err != nil {
-			log.Println("reload failed:", err)
-			return
-		}
-		registry.ReplaceAll(handlers)
-		log.Println("configs reloaded")
-	}
+	log.Println("Watcher started on", dir)
 
 	for {
 		select {
-		case ev := <-watcher.Events:
-			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
-				if debounce != nil {
-					debounce.Stop()
-				}
-				debounce = time.AfterFunc(300*time.Millisecond, reload)
+		case ev, ok := <-watcher.Events:
+			if !ok {
+				return
 			}
 
-		case err := <-watcher.Errors:
-			log.Println("watcher error:", err)
+			// Only care about JSON files
+			if filepath.Ext(ev.Name) != ".json" {
+				continue
+			}
+
+			// Debouncing logic can be complex in granular updates.
+			// For simplicity, we process immediately, but a production system might
+			// use a map of timers per file.
+
+			// Handle REMOVE / RENAME (Old file gone)
+			if ev.Op&fsnotify.Remove == fsnotify.Remove || ev.Op&fsnotify.Rename == fsnotify.Rename {
+				apiName := strings.TrimSuffix(filepath.Base(ev.Name), ".json")
+				log.Printf("Config removed/renamed: %s", apiName)
+				registry.Remove(apiName)
+			}
+
+			// Handle CREATE / WRITE (New/Modified file)
+			if ev.Op&fsnotify.Create == fsnotify.Create || ev.Op&fsnotify.Write == fsnotify.Write {
+				log.Printf("Config changed: %s", ev.Name)
+
+				// Rebuild ONLY this file
+				apiName, handler, err := buildFromPath(ev.Name)
+				if err != nil {
+					log.Printf("Failed to reload %s: %v", ev.Name, err)
+					continue
+				}
+
+				// Granular Update
+				registry.Register(apiName, handler)
+				log.Printf("✓ Reloaded API: %s", apiName)
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Println("Watcher error:", err)
 		}
 	}
 }

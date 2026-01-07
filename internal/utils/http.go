@@ -1,14 +1,16 @@
 package utils
 
 import (
-	"encoding/json"
 	"net/http"
+
+	json "github.com/goccy/go-json"
 )
 
 // WriteJSON writes a JSON response with status code
 func WriteJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	// goccy/go-json is much faster at encoding
 	_ = json.NewEncoder(w).Encode(payload)
 }
 

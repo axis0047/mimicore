@@ -1,52 +1,52 @@
 package v2
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strings"
 
+	json "github.com/goccy/go-json"
+
 	"github.com/axis0047/mockingGOD/internal/ir"
 )
 
-// Compile now accepts []V2RouteConfig directly
 func Compile(routes []V2RouteConfig) ([]ir.EnhancedRoute, error) {
 	var enhancedRoutes []ir.EnhancedRoute
 
 	for _, cfg := range routes {
-		// No need to unmarshal/marshal anymore, we have the struct
-
-		// Build base route
 		baseRoute := buildBaseRoute(cfg)
-
-		// Build validation steps
 		validationSteps := buildValidationSteps(cfg.Validate)
-
-		// Build transformation steps
 		transformSteps := buildTransformSteps(cfg.Transform)
+
+		// Map Delay Config
+		var delayCfg ir.DelayConfig
+		if cfg.Delay != nil {
+			delayCfg = ir.DelayConfig{
+				FixedMs:  cfg.Delay.FixedMs,
+				JitterMs: cfg.Delay.JitterMs,
+			}
+		}
 
 		enhancedRoutes = append(enhancedRoutes, ir.EnhancedRoute{
 			Route:           baseRoute,
 			ValidationSteps: validationSteps,
 			TransformSteps:  transformSteps,
+			Delay:           delayCfg,
 		})
 	}
 
 	return enhancedRoutes, nil
 }
 
-// CompileFile reads v2 config from file (Legacy helper)
 func CompileFile(path string) ([]ir.EnhancedRoute, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// We unmarshal into the struct now, not map[string]interface{}
-	var fileCfg APIFileConfig // Using the struct from config.go
+	var fileCfg APIFileConfig
 	if err := json.Unmarshal(raw, &fileCfg); err != nil {
-		// Fallback: try unmarshalling just the array if it's not the full object
 		var routes []V2RouteConfig
 		if err2 := json.Unmarshal(raw, &routes); err2 != nil {
 			return nil, fmt.Errorf("unmarshal failed: %w", err)
@@ -59,21 +59,16 @@ func CompileFile(path string) ([]ir.EnhancedRoute, error) {
 
 func buildBaseRoute(cfg V2RouteConfig) ir.Route {
 	segs := strings.Split(strings.Trim(cfg.Path, "/"), "/")
-
 	log.Printf("  Building base route: %s %s -> segments: %v", cfg.Method, cfg.Path, segs)
 
 	var rules []ir.ResponseRule
 	for k, v := range cfg.Response.Body {
-		// Check if value contains template syntax {{...}}
 		if str, ok := v.(string); ok && strings.Contains(str, "{{") {
-			// This is a dynamic value - store as StaticValue containing the template string.
-			// The EnhancedRouter will detect the "{{" and resolve it at runtime.
 			rules = append(rules, ir.ResponseRule{
 				Target: k,
 				Source: ir.StaticValue{Value: str},
 			})
 		} else {
-			// Static value
 			rules = append(rules, ir.ResponseRule{
 				Target: k,
 				Source: ir.StaticValue{Value: v},
@@ -81,11 +76,19 @@ func buildBaseRoute(cfg V2RouteConfig) ir.Route {
 		}
 	}
 
+	// Also map Status Code
+	status := cfg.Response.Status
+	if status == 0 {
+		status = 200
+	}
+	// We can store status as a specific rule or handle it in the response builder.
+	// For now, let's just stick to body rules and rely on default 200 in engine if not dynamic.
+	// (To fully support dynamic status, we'd need a ResponseRule for status too).
+
 	return ir.Route{
-		Method:     cfg.Method,
-		Path:       ir.PathTemplate{Segments: segs},
-		Validators: nil, // Validators are handled in EnhancedRouter via ValidationSteps
-		Response:   rules,
+		Method:   cfg.Method,
+		Path:     ir.PathTemplate{Segments: segs},
+		Response: rules,
 	}
 }
 
@@ -104,7 +107,21 @@ func buildValidationSteps(validate *ValidationConfig) []ir.ValidationStep {
 		})
 	}
 
-	// Add other validations (Query, Body) here if needed in future
+	for field, rule := range validate.Query {
+		steps = append(steps, ir.ValidationStep{
+			Type:  "query",
+			Field: field,
+			Rules: rule,
+		})
+	}
+
+	if validate.Body != nil {
+		steps = append(steps, ir.ValidationStep{
+			Type:  "body",
+			Rules: validate.Body.Schema, // Pass the schema map directly
+		})
+	}
+
 	return steps
 }
 
@@ -116,7 +133,6 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 	var steps []ir.TransformStep
 
 	for mapKey, rule := range transform.Extract {
-		// FIX: Use the 'as' field (rule.To) if provided, otherwise fallback to mapKey
 		targetVar := rule.To
 		if targetVar == "" {
 			targetVar = mapKey
@@ -126,22 +142,26 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 			Type: "extract",
 			Config: ir.ExtractTransform{
 				From: rule.From,
-				To:   targetVar, // Use the correct variable name
+				To:   targetVar,
 			},
 		})
 	}
 
-	for _, httpCall := range transform.HTTP {
-		steps = append(steps, ir.TransformStep{
-			Type: "http",
-			Config: ir.HTTPTransform{
+	if len(transform.HTTP) > 0 {
+		var batch []ir.HTTPTransform
+		for _, httpCall := range transform.HTTP {
+			batch = append(batch, ir.HTTPTransform{
 				Name:    httpCall.Name,
 				URL:     httpCall.URL,
 				Method:  httpCall.Method,
 				Headers: httpCall.Headers,
 				Body:    httpCall.Body,
 				Timeout: httpCall.Timeout,
-			},
+			})
+		}
+		steps = append(steps, ir.TransformStep{
+			Type:   "http_batch",
+			Config: ir.ParallelHTTPConfig{Calls: batch},
 		})
 	}
 

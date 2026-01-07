@@ -1,21 +1,35 @@
 package engine
 
 import (
-	"encoding/json"
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	json "github.com/goccy/go-json"
+	"github.com/santhosh-tekuri/jsonschema/v5"
+	"golang.org/x/sync/errgroup"
+
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
 )
+
+var sharedHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 type EnhancedRouter struct {
 	Routes []ir.EnhancedRoute
@@ -32,12 +46,12 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	log.Printf("Matched route: %s %s", route.Method, strings.Join(route.Path.Segments, "/"))
 
-	ctx := map[string]any{}
+	ctx := NewSafeContext()
 	for k, v := range params {
-		ctx[k] = v
+		ctx.Set(k, v)
 	}
 
-	// Phase 1: Validation (RESTORED)
+	// Phase 1: Validation (Header + Schema)
 	if err := r.runValidation(route, req); err != nil {
 		log.Printf("Validation failed: %v", err)
 		utils.WriteError(w, http.StatusBadRequest, err.Error())
@@ -69,6 +83,16 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		utils.SetNested(resp, rule.Target, val)
 	}
 
+	// Phase 4: Latency Simulation
+	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
+		sleepTime := time.Duration(route.Delay.FixedMs) * time.Millisecond
+		if route.Delay.JitterMs > 0 {
+			randMs := time.Duration(rand.Intn(route.Delay.JitterMs)) * time.Millisecond
+			sleepTime += randMs
+		}
+		time.Sleep(sleepTime)
+	}
+
 	utils.WriteJSON(w, http.StatusOK, resp)
 }
 
@@ -89,7 +113,6 @@ func (r *EnhancedRouter) matchRoute(req *http.Request) (*ir.EnhancedRoute, map[s
 	return nil, nil
 }
 
-// --- RESTORED LOGIC ---
 func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Request) error {
 	if len(route.ValidationSteps) == 0 {
 		return nil
@@ -100,7 +123,6 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 		case "header":
 			rules, ok := step.Rules.(v2.ValidationRule)
 			if !ok {
-				// Safety check for pointer vs value
 				if ptr, okPtr := step.Rules.(*v2.ValidationRule); okPtr {
 					rules = *ptr
 				} else {
@@ -109,36 +131,64 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 			}
 
 			val := req.Header.Get(step.Field)
-
-			// Required check
 			if rules.Required && val == "" {
 				return fmt.Errorf("header %q is required", step.Field)
 			}
-
-			// Pattern check
 			if rules.Pattern != "" && val != "" {
 				matched, err := regexp.MatchString(rules.Pattern, val)
-				if err != nil {
-					return fmt.Errorf("invalid regex for %s", step.Field)
+				if err != nil || !matched {
+					return fmt.Errorf("header %q validation failed", step.Field)
 				}
-				if !matched {
-					return fmt.Errorf("header %q value does not match pattern", step.Field)
-				}
+			}
+
+		case "body":
+			// JSON Schema Validation
+			schemaMap, ok := step.Rules.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Read body
+			bodyBytes, err := io.ReadAll(req.Body)
+			if err != nil {
+				return fmt.Errorf("failed to read body")
+			}
+			// Restore body
+			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			// Compile Schema
+			compiler := jsonschema.NewCompiler()
+			schemaJSON, _ := json.Marshal(schemaMap)
+			if err := compiler.AddResource("schema.json", bytes.NewReader(schemaJSON)); err != nil {
+				return fmt.Errorf("invalid schema: %v", err)
+			}
+			schema, err := compiler.Compile("schema.json")
+			if err != nil {
+				return fmt.Errorf("schema compile error: %v", err)
+			}
+
+			// Validate
+			var v interface{}
+			if err := json.Unmarshal(bodyBytes, &v); err != nil {
+				return fmt.Errorf("invalid json body")
+			}
+			if err := schema.Validate(v); err != nil {
+				return fmt.Errorf("body schema validation failed: %v", err)
 			}
 		}
 	}
 	return nil
 }
 
-func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.Request, ctx map[string]any) error {
+func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.Request, ctx *SafeContext) error {
 	for _, step := range route.TransformSteps {
 		switch step.Type {
 		case "extract":
 			if err := r.handleExtract(step, req, ctx); err != nil {
 				return err
 			}
-		case "http":
-			if err := r.handleHTTP(step, ctx); err != nil {
+		case "http_batch":
+			if err := r.handleHTTPBatch(step, ctx); err != nil {
 				return err
 			}
 		}
@@ -146,143 +196,179 @@ func (r *EnhancedRouter) runTransformations(route *ir.EnhancedRoute, req *http.R
 	return nil
 }
 
-func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request, ctx map[string]any) error {
+func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request, ctx *SafeContext) error {
 	extractCfg, ok := step.Config.(ir.ExtractTransform)
 	if !ok {
 		return fmt.Errorf("invalid config for extract step")
 	}
 
 	parts := strings.SplitN(extractCfg.From, ".", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid 'from' format: %s", extractCfg.From)
+	source, key := "", ""
+	if len(parts) == 2 {
+		source, key = parts[0], parts[1]
+	} else {
+		// Handle "body" whole extraction
+		source = parts[0]
 	}
-	source, key := parts[0], parts[1]
 
-	var value string
+	var value any // Can be string or map/object
+	var valStr string
+
 	switch source {
 	case "header":
-		value = req.Header.Get(key)
+		valStr = req.Header.Get(key)
+		value = valStr
 	case "path":
-		if val, exists := ctx[key]; exists {
-			value = fmt.Sprintf("%v", val)
+		if val, exists := ctx.Get(key); exists {
+			value = val
+			valStr = fmt.Sprintf("%v", val)
 		}
 	case "query":
-		value = req.URL.Query().Get(key)
+		valStr = req.URL.Query().Get(key)
+		value = valStr
+	case "body":
+		// Only support extracting full body as JSON for now
+		if req.Body != nil {
+			bodyBytes, _ := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			var jsonBody interface{}
+			if err := json.Unmarshal(bodyBytes, &jsonBody); err == nil {
+				value = jsonBody
+			} else {
+				value = string(bodyBytes)
+			}
+			valStr = "<body>"
+		}
 	}
 
-	// Logging to verify extraction
-	if value != "" {
-		ctx[extractCfg.To] = value
-		log.Printf("EXTRACT: %s -> ctx[%s] = %s", extractCfg.From, extractCfg.To, value)
-	} else {
-		log.Printf("EXTRACT WARNING: %s was empty", extractCfg.From)
+	if value != nil {
+		ctx.Set(extractCfg.To, value)
+		log.Printf("EXTRACT: %s -> ctx[%s]", extractCfg.From, extractCfg.To)
 	}
-
 	return nil
 }
 
-func (r *EnhancedRouter) handleHTTP(step ir.TransformStep, ctx map[string]any) error {
-	cfg, ok := step.Config.(ir.HTTPTransform)
+// handleHTTPBatch and performSingleHTTP remain mostly the same,
+// ensuring they use goccy/go-json and sharedHTTPClient...
+func (r *EnhancedRouter) handleHTTPBatch(step ir.TransformStep, ctx *SafeContext) error {
+	batchCfg, ok := step.Config.(ir.ParallelHTTPConfig)
 	if !ok {
-		return fmt.Errorf("invalid HTTP config")
+		return fmt.Errorf("invalid http batch config")
 	}
 
+	g, _ := errgroup.WithContext(context.Background())
+	for _, cfg := range batchCfg.Calls {
+		c := cfg
+		g.Go(func() error { return r.performSingleHTTP(c, ctx) })
+	}
+	return g.Wait()
+}
+
+func (r *EnhancedRouter) performSingleHTTP(cfg ir.HTTPTransform, ctx *SafeContext) error {
 	finalURL := r.resolveTemplate(cfg.URL, ctx)
 	req, err := http.NewRequest(cfg.Method, finalURL, nil)
 	if err != nil {
 		return err
 	}
 
-	// Add headers from config
 	for k, v := range cfg.Headers {
 		req.Header.Set(k, r.resolveTemplate(v, ctx))
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	timeout := 5000
+	if cfg.Timeout > 0 {
+		timeout = cfg.Timeout
+	}
+	ctxReq, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(ctxReq)
+
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
-
 	var result any
 	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		// If not JSON, store as string
 		result = string(bodyBytes)
 	}
-
-	ctx[cfg.Name] = result
-	log.Printf("HTTP CALL: %s -> Status %d", finalURL, resp.StatusCode)
-
+	ctx.Set(cfg.Name, result)
 	return nil
 }
 
-// resolveTemplate resolves {{var}} and {{func(var)}}
-func (r *EnhancedRouter) resolveTemplate(template string, ctx map[string]any) string {
+func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) string {
 	re := regexp.MustCompile(`\{\{([^}]+)\}\}`)
 
 	return re.ReplaceAllStringFunc(template, func(match string) string {
 		content := strings.TrimSpace(match[2 : len(match)-2])
 
-		// 1. Function Call Detection: name(args)
 		funcRe := regexp.MustCompile(`^(\w+)\((.*)\)$`)
 		funcMatch := funcRe.FindStringSubmatch(content)
 
 		if len(funcMatch) == 3 {
 			funcName := funcMatch[1]
-			argsStr := funcMatch[2]
+			argVar := strings.TrimSpace(funcMatch[2])
 
 			if r.Wasm == nil {
 				return "[error: no user code]"
 			}
 
-			var wasmArgs []uint64
-			rawArgs := strings.Split(argsStr, ",")
+			// Resolve argument
+			val := r.resolveVariable(argVar, ctx)
 
-			for _, rawArg := range rawArgs {
-				rawArg = strings.TrimSpace(rawArg)
-				if rawArg == "" {
-					continue
-				}
-
-				resolved := r.resolveVariable(rawArg, ctx)
-
-				// Ensure resolved is string before parsing
-				strVal := fmt.Sprintf("%v", resolved)
-
-				intVal, err := strconv.ParseUint(strVal, 10, 64)
+			// Try Legacy Integer Strategy first (fastest)
+			strVal := fmt.Sprintf("%v", val)
+			if intVal, err := strconv.ParseUint(strVal, 10, 64); err == nil {
+				res, err := r.Wasm.Call(funcName, intVal)
 				if err != nil {
-					log.Printf("WASM Arg Error: '%s' (resolved from %s) is not int", strVal, rawArg)
-					return "[error: arg not int]"
+					return fmt.Sprintf("[error: %v]", err)
 				}
-				wasmArgs = append(wasmArgs, intVal)
+				return fmt.Sprintf("%d", res)
 			}
 
-			result, err := r.Wasm.Call(funcName, wasmArgs...)
+			// Fallback to JSON/String Strategy (malloc/free)
+			// Marshal the input variable to JSON string
+			jsonBytes, _ := json.Marshal(val)
+			jsonStr := string(jsonBytes)
+
+			// Remove quotes if it was just a string primitive to avoid double quoting "value"
+			if s, ok := val.(string); ok {
+				jsonStr = s
+			}
+
+			resStr, err := r.Wasm.CallJSON(funcName, jsonStr)
 			if err != nil {
 				return fmt.Sprintf("[error: %v]", err)
 			}
-			return fmt.Sprintf("%d", result)
+			return resStr
 		}
 
-		// 2. Variable Lookup
 		val := r.resolveVariable(content, ctx)
 		return fmt.Sprintf("%v", val)
 	})
 }
 
-func (r *EnhancedRouter) resolveVariable(key string, ctx map[string]any) any {
-	if val, ok := ctx[key]; ok {
+func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) any {
+	if val, ok := ctx.Get(key); ok {
 		return val
 	}
+
 	if strings.Contains(key, ".") {
 		parts := strings.Split(key, ".")
 		if len(parts) == 2 {
-			if root, ok := ctx[parts[0]].(map[string]any); ok {
-				if subVal, ok := root[parts[1]]; ok {
-					return subVal
+			if root, ok := ctx.Get(parts[0]); ok {
+				if rootMap, ok := root.(map[string]any); ok {
+					if subVal, ok := rootMap[parts[1]]; ok {
+						return subVal
+					}
+				}
+				if rootMap, ok := root.(map[string]interface{}); ok {
+					if subVal, ok := rootMap[parts[1]]; ok {
+						return subVal
+					}
 				}
 			}
 		}
