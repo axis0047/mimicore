@@ -30,7 +30,7 @@ I mainly work with Python and C/C++ and Go is new to me. I built with support of
 
 1.  **Clone the repository**
     ```bash
-    git clone https://github.com/yourusername/mockingGOD.git
+    git clone https://github.com/axis0047/mockingGOD.git
     cd mockingGOD
     ```
 
