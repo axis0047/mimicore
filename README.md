@@ -80,7 +80,7 @@ I mainly work with Python and C/C++ and Go is new to me. I built with support of
     ```bash
     curl -H "Host:my_api.localhost" http://localhost:8080/calc/5
     ```
-    Or use wildcard domains with a proxy like Nginx or HAProxy.
+    You may need to edit /etc/hosts for testing this locally or use wildcard domains with a proxy like Nginx or HAProxy.
 
     **Response:**
     ```json
@@ -134,7 +134,7 @@ For a detailed guide on all available configuration parameters (Validation, HTTP
 
 ## 🧪 Testing
 
-Run the internal unit tests to verify the engine logic:
+Checkout to relevant test branches and run the internal unit tests to verify the engine logic:
 
 ```bash
 go test ./internal/engine/... -v
