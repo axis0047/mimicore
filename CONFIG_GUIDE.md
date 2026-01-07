@@ -1,4 +1,3 @@
----
 # MockingGOD V2 Configuration Guide
 
 This document describes the structure and parameters for the V2 API configuration files.
@@ -140,4 +139,3 @@ This example validates a user via JSON schema, extracts the body, simulates netw
   ]
 }
 ```
----
