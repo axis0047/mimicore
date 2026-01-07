@@ -17,7 +17,7 @@ I mainly work with Python and C/C++. Go is new to me. I built this with support 
 *   **Parallel Execution**: Transformation steps (like upstream HTTP calls) are batched and executed concurrently using `errgroup`.
 *   **High Performance**: Uses `goccy/go-json` for fast parsing and a global connection pool for low-latency HTTP chaining.
 
-### Advanced V2 Capabilities
+### Advanced Capabilities
 *   **Dynamic User Code (WASM)**: Write Go code directly in your JSON. It is compiled to WASM on-the-fly and executed in a sandboxed, pooled runtime (Wazero). Supports complex JSON manipulation.
 *   **Distributed Caching (S3/MinIO)**: Compiled WASM binaries are hashed and stored in S3/MinIO. This enables instant startup for clusters and prevents "thundering herd" compilation spikes.
 *   **Robust Validation**: Full support for **JSON Schema** validation for request bodies, plus Regex patterns for Headers/Query params.
