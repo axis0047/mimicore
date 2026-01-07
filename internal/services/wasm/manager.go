@@ -30,12 +30,8 @@ type Manager struct {
 
 func NewManager(cfg Config) (*Manager, error) {
 	ctx := context.Background()
-
-	// 1. Create Runtime
 	r := wazero.NewRuntime(ctx)
 
-	// 2. Instantiate WASI (System Interface) - ONCE per Runtime
-	// This registers the "wasi_snapshot_preview1" module that your TinyGo code needs.
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, r); err != nil {
 		r.Close(ctx)
 		return nil, fmt.Errorf("failed to instantiate WASI: %w", err)
@@ -46,7 +42,6 @@ func NewManager(cfg Config) (*Manager, error) {
 		return nil, fmt.Errorf("wasm binary is empty")
 	}
 
-	// 3. Compile the module once (Performance)
 	compiled, err := r.CompileModule(ctx, cfg.Binary)
 	if err != nil {
 		r.Close(ctx)
@@ -60,7 +55,6 @@ func NewManager(cfg Config) (*Manager, error) {
 		pool:         make(chan api.Module, cfg.PoolSize),
 	}
 
-	// 4. Pre-warm the pool
 	for i := 0; i < cfg.PoolSize; i++ {
 		mod, err := mgr.instantiate(ctx)
 		if err != nil {
@@ -73,44 +67,14 @@ func NewManager(cfg Config) (*Manager, error) {
 	return mgr, nil
 }
 
-func (m *Manager) instantiate(ctx context.Context) (api.Module, error) {
-	// REMOVED: wasi_snapshot_preview1.MustInstantiate(ctx, m.runtime)
-	// It is now handled in NewManager once.
-
-	// Create config with limits
-	modConfig := wazero.NewModuleConfig().
-		WithSysWalltime().
-		WithSysNanotime().
-		WithRandSource(nil)
-
-	// Instantiate the user's module (links to the already loaded WASI)
-	return m.runtime.InstantiateModule(ctx, m.compiledCode, modConfig)
-}
-
-// Call executes a function with Security limits (Timeout)
+// Call executes a function with simple integer arguments
 func (m *Manager) Call(funcName string, args ...uint64) (uint64, error) {
-	var mod api.Module
-	select {
-	case mod = <-m.pool:
-	default:
-		// Pool exhausted, create temporary instance
-		var err error
-		mod, err = m.instantiate(context.Background())
-		if err != nil {
-			return 0, err
-		}
+	mod, release, err := m.acquire()
+	if err != nil {
+		return 0, err
 	}
+	defer release()
 
-	defer func() {
-		// Return to pool if not closed, otherwise close it
-		select {
-		case m.pool <- mod:
-		default:
-			mod.Close(context.Background())
-		}
-	}()
-
-	// Security: Timeout enforcement
 	ctx, cancel := context.WithTimeout(context.Background(), m.config.Timeout)
 	defer cancel()
 
@@ -128,6 +92,95 @@ func (m *Manager) Call(funcName string, args ...uint64) (uint64, error) {
 		return results[0], nil
 	}
 	return 0, nil
+}
+
+func (m *Manager) instantiate(ctx context.Context) (api.Module, error) {
+	// Create config with limits
+	modConfig := wazero.NewModuleConfig().
+		WithSysWalltime().
+		WithSysNanotime().
+		WithRandSource(nil).
+		// FIX: Prevent _start from running automatically.
+		// This keeps the module "alive" so we can call functions on it repeatedly.
+		WithStartFunctions()
+
+	return m.runtime.InstantiateModule(ctx, m.compiledCode, modConfig)
+}
+
+func (m *Manager) CallJSON(funcName string, input string) (string, error) {
+	mod, release, err := m.acquire()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.Timeout)
+	defer cancel()
+
+	// 1. Allocate Memory using INJECTED helper
+	inputSize := uint64(len(input))
+
+	// FIX: Use the internal name we injected in compiler.go
+	fnAlloc := mod.ExportedFunction("_guest_alloc")
+	if fnAlloc == nil {
+		return "", fmt.Errorf("module initialization error: _guest_alloc not found")
+	}
+
+	results, err := fnAlloc.Call(ctx, inputSize)
+	if err != nil {
+		return "", fmt.Errorf("alloc failed: %w", err)
+	}
+	inputPtr := results[0]
+
+	// 2. Write to Memory
+	if !mod.Memory().Write(uint32(inputPtr), []byte(input)) {
+		return "", fmt.Errorf("failed to write memory")
+	}
+
+	// 3. Call User Function
+	f := mod.ExportedFunction(funcName)
+	if f == nil {
+		return "", fmt.Errorf("function %s not exported by user", funcName)
+	}
+
+	res, err := f.Call(ctx, inputPtr, inputSize)
+	if err != nil {
+		return "", fmt.Errorf("wasm call failed: %w", err)
+	}
+
+	// 4. Read Result
+	packed := res[0]
+	resPtr := uint32(packed >> 32)
+	resLen := uint32(packed)
+
+	bytes, ok := mod.Memory().Read(resPtr, resLen)
+	if !ok {
+		return "", fmt.Errorf("failed to read result memory")
+	}
+
+	return string(bytes), nil
+}
+
+func (m *Manager) acquire() (api.Module, func(), error) {
+	var mod api.Module
+	select {
+	case mod = <-m.pool:
+	default:
+		var err error
+		mod, err = m.instantiate(context.Background())
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	release := func() {
+		select {
+		case m.pool <- mod:
+		default:
+			mod.Close(context.Background())
+		}
+	}
+	return mod, release, nil
 }
 
 func (m *Manager) Close() {
