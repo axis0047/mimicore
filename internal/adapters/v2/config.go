@@ -1,11 +1,13 @@
 package v2
 
+// V2RouteConfig represents the enhanced route configuration
 type V2RouteConfig struct {
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Validate  *ValidationConfig `json:"validate,omitempty"`
 	Transform *TransformConfig  `json:"transform,omitempty"`
 	Response  ResponseConfig    `json:"response"`
+	Delay     *DelayConfig      `json:"delay,omitempty"` // NEW
 }
 
 type ValidationConfig struct {
@@ -22,7 +24,13 @@ type ValidationRule struct {
 }
 
 type BodyValidation struct {
-	Schema string `json:"schema"`
+	// Changed to map to accept full JSON schema objects
+	Schema map[string]interface{} `json:"schema"`
+}
+
+type DelayConfig struct {
+	FixedMs  int `json:"fixed_ms"`
+	JitterMs int `json:"jitter_ms"`
 }
 
 type TransformConfig struct {
@@ -59,17 +67,15 @@ type ResponseConfig struct {
 	Body    map[string]interface{} `json:"body"`
 }
 
-// UserCodeConfig defines dynamic user code settings
 type UserCodeConfig struct {
-	InlineSource string `json:"inline_source,omitempty"` // Raw Go code
-	Filepath     string `json:"source,omitempty"`        // Fallback file path
+	InlineSource string `json:"inline_source,omitempty"`
+	Filepath     string `json:"source,omitempty"`
 	TimeoutMs    int    `json:"timeout_ms"`
 	MaxMemoryMB  int    `json:"max_memory_mb"`
 	MinInstances int    `json:"min_instances"`
 	MaxInstances int    `json:"max_instances"`
 }
 
-// APIFileConfig represents the full JSON file structure
 type APIFileConfig struct {
 	API      string          `json:"api"`
 	Mode     string          `json:"mode"`

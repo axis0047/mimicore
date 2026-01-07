@@ -19,17 +19,26 @@ func Compile(routes []V2RouteConfig) ([]ir.EnhancedRoute, error) {
 		validationSteps := buildValidationSteps(cfg.Validate)
 		transformSteps := buildTransformSteps(cfg.Transform)
 
+		// Map Delay Config
+		var delayCfg ir.DelayConfig
+		if cfg.Delay != nil {
+			delayCfg = ir.DelayConfig{
+				FixedMs:  cfg.Delay.FixedMs,
+				JitterMs: cfg.Delay.JitterMs,
+			}
+		}
+
 		enhancedRoutes = append(enhancedRoutes, ir.EnhancedRoute{
 			Route:           baseRoute,
 			ValidationSteps: validationSteps,
 			TransformSteps:  transformSteps,
+			Delay:           delayCfg,
 		})
 	}
 
 	return enhancedRoutes, nil
 }
 
-// CompileFile reads v2 config from file (Legacy helper)
 func CompileFile(path string) ([]ir.EnhancedRoute, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -38,7 +47,6 @@ func CompileFile(path string) ([]ir.EnhancedRoute, error) {
 
 	var fileCfg APIFileConfig
 	if err := json.Unmarshal(raw, &fileCfg); err != nil {
-		// Fallback: try unmarshalling just the array if it's not the full object
 		var routes []V2RouteConfig
 		if err2 := json.Unmarshal(raw, &routes); err2 != nil {
 			return nil, fmt.Errorf("unmarshal failed: %w", err)
@@ -68,6 +76,15 @@ func buildBaseRoute(cfg V2RouteConfig) ir.Route {
 		}
 	}
 
+	// Also map Status Code
+	status := cfg.Response.Status
+	if status == 0 {
+		status = 200
+	}
+	// We can store status as a specific rule or handle it in the response builder.
+	// For now, let's just stick to body rules and rely on default 200 in engine if not dynamic.
+	// (To fully support dynamic status, we'd need a ResponseRule for status too).
+
 	return ir.Route{
 		Method:   cfg.Method,
 		Path:     ir.PathTemplate{Segments: segs},
@@ -79,7 +96,9 @@ func buildValidationSteps(validate *ValidationConfig) []ir.ValidationStep {
 	if validate == nil {
 		return nil
 	}
+
 	var steps []ir.ValidationStep
+
 	for field, rule := range validate.Headers {
 		steps = append(steps, ir.ValidationStep{
 			Type:  "header",
@@ -87,6 +106,22 @@ func buildValidationSteps(validate *ValidationConfig) []ir.ValidationStep {
 			Rules: rule,
 		})
 	}
+
+	for field, rule := range validate.Query {
+		steps = append(steps, ir.ValidationStep{
+			Type:  "query",
+			Field: field,
+			Rules: rule,
+		})
+	}
+
+	if validate.Body != nil {
+		steps = append(steps, ir.ValidationStep{
+			Type:  "body",
+			Rules: validate.Body.Schema, // Pass the schema map directly
+		})
+	}
+
 	return steps
 }
 
@@ -97,12 +132,12 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 
 	var steps []ir.TransformStep
 
-	// 1. Extract Steps (Sequential)
 	for mapKey, rule := range transform.Extract {
 		targetVar := rule.To
 		if targetVar == "" {
 			targetVar = mapKey
 		}
+
 		steps = append(steps, ir.TransformStep{
 			Type: "extract",
 			Config: ir.ExtractTransform{
@@ -112,10 +147,8 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 		})
 	}
 
-	// 2. HTTP Steps (BATCHED for Parallelism)
 	if len(transform.HTTP) > 0 {
 		var batch []ir.HTTPTransform
-
 		for _, httpCall := range transform.HTTP {
 			batch = append(batch, ir.HTTPTransform{
 				Name:    httpCall.Name,
@@ -126,26 +159,9 @@ func buildTransformSteps(transform *TransformConfig) []ir.TransformStep {
 				Timeout: httpCall.Timeout,
 			})
 		}
-
-		// Add as a single step
 		steps = append(steps, ir.TransformStep{
-			Type: "http_batch", // New Type
-			Config: ir.ParallelHTTPConfig{
-				Calls: batch,
-			},
-		})
-	}
-
-	// 3. WASM (Currently sequential, could be batched similarly if needed)
-	for _, wasmCall := range transform.WASM {
-		steps = append(steps, ir.TransformStep{
-			Type: "wasm",
-			Config: ir.WASMTransform{
-				Name:     wasmCall.Name,
-				Module:   wasmCall.Module,
-				Function: wasmCall.Function,
-				Args:     wasmCall.Args,
-			},
+			Type:   "http_batch",
+			Config: ir.ParallelHTTPConfig{Calls: batch},
 		})
 	}
 

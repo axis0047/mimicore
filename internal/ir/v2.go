@@ -4,26 +4,30 @@ type EnhancedRoute struct {
 	Route
 	ValidationSteps []ValidationStep
 	TransformSteps  []TransformStep
+	Delay           DelayConfig // NEW
+}
+
+type DelayConfig struct {
+	FixedMs  int
+	JitterMs int
 }
 
 type ValidationStep struct {
-	Type  string
-	Field string
-	Rules interface{}
+	Type  string      // "header", "query", "body"
+	Field string      // Field name (empty for body)
+	Rules interface{} // ValidationRule or map[string]any (schema)
 }
 
 type TransformStep struct {
-	Type   string // "extract", "http_batch" (UPDATED), "wasm"
+	Type   string // "extract", "http_batch", "wasm"
 	Config interface{}
 }
 
-// ExtractTransform remains the same...
 type ExtractTransform struct {
 	From string
 	To   string
 }
 
-// HTTPTransform remains the same...
 type HTTPTransform struct {
 	Name    string
 	URL     string
@@ -33,12 +37,10 @@ type HTTPTransform struct {
 	Timeout int
 }
 
-// NEW: Wrapper for parallel calls
 type ParallelHTTPConfig struct {
 	Calls []HTTPTransform
 }
 
-// WASMTransform remains the same...
 type WASMTransform struct {
 	Name     string
 	Module   string
