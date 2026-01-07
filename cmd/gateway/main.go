@@ -10,6 +10,11 @@ import (
 )
 
 func main() {
+	configDir := "configs"
+	if len(os.Args) > 1 {
+		configDir = os.Args[1]
+	}
+
 	// 1. Init Storage (Optional: Only if ENV vars are present)
 	if os.Getenv("MINIO_ENDPOINT") != "" {
 		err := storage.Init(storage.S3Config{
@@ -24,18 +29,19 @@ func main() {
 		}
 
 		// Run GC on startup to clean old mess
-		go RunGarbageCollection("configs")
+		go RunGarbageCollection(configDir)
 	}
 
 	registry := engine.NewRegistry()
 
-	handlers, err := buildHandlers("configs")
+	handlers, err := buildHandlers(configDir)
+
 	if err != nil {
 		log.Fatal(err)
 	}
 	registry.ReplaceAll(handlers)
 
-	go watchConfigs("configs", registry)
+	go watchConfigs(configDir, registry)
 
 	gateway := &engine.Gateway{Registry: registry}
 
