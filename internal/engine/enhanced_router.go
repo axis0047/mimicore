@@ -21,6 +21,7 @@ import (
 	"github.com/axis0047/mockingGOD/internal/ir"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
+    "github.com/axis0047/mockingGOD/internal/middleware"
 )
 
 var sharedHTTPClient = &http.Client{
@@ -310,6 +311,8 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 
 		if len(funcMatch) == 3 {
 			funcName := funcMatch[1]
+			// MEASURE EXECUTION
+            start := time.Now()
 			argVar := strings.TrimSpace(funcMatch[2])
 
 			if r.Wasm == nil {
@@ -340,6 +343,10 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 			}
 
 			resStr, err := r.Wasm.CallJSON(funcName, jsonStr)
+			// Record Metric
+            // We assume we can access the API Name.
+            // Ideally, EnhancedRouter should store 'APIName' string field.
+            middleware.WasmDuration.WithLabelValues("dynamic_api", funcName).Observe(time.Since(start).Seconds())
 			if err != nil {
 				return fmt.Sprintf("[error: %v]", err)
 			}

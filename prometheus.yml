@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s # Scrape often for high-performance testing
+
+scrape_configs:
+  - job_name: "mockinggod-gateway"
+    metrics_path: "/metrics"
+    static_configs:
+      # 'gateway' is the service name in docker-compose
+      # port 9090 is where we exposed metrics in main.go
+      - targets: ["gateway:9090"]

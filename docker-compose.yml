@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  gateway:
+    build: .
+    image: mockinggod:v1.1
+    # FIX 1: Retry on crash (Wait for MinIO)
+    restart: on-failure
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=password
+    volumes:
+      - ./configs:/app/configs
+    depends_on:
+      - minio
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001" # Console (Browser)
+      # FIX 2: Expose API port (Required for external tools/debugging)
+      - "9000:9000"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    volumes:
+      - minio_data:/data
+
+  # ... (Prometheus and Grafana remain the same) ...
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9091:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  minio_data:
+  prometheus_data:
+  grafana_data:
