@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// Counter: Total requests received
+	// Counter: Total requests
 	httpRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "mockinggod_http_requests_total",
@@ -19,7 +19,7 @@ var (
 		[]string{"api", "method", "status"},
 	)
 
-	// Histogram: Total Request Duration (Client perspective)
+	// Histogram: Latency
 	httpRequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "mockinggod_http_request_duration_seconds",
@@ -29,7 +29,7 @@ var (
 		[]string{"api", "method"},
 	)
 
-	// Histogram: WASM Execution Time (Internal engine perspective)
+	// Histogram: WASM Execution
 	WasmDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "mockinggod_wasm_execution_seconds",
@@ -40,7 +40,7 @@ var (
 	)
 )
 
-// ResponseWriter wrapper to capture status code
+// Helper to capture status code
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -51,18 +51,14 @@ func (rec *statusRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
-// Middleware function to wrap the Gateway
 func MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Extract API name from Host (reuse logic or pass via context)
-		// For now, simple extraction matching gateway.go logic:
+		// Simple host extraction for metrics
 		host := r.Host
-		// (Simplified host parsing for metric label)
 
 		rec := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
-
 		next.ServeHTTP(rec, r)
 
 		duration := time.Since(start).Seconds()
