@@ -20,7 +20,6 @@ import (
 
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
-	"github.com/axis0047/mockingGOD/internal/middleware"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
 )
@@ -34,9 +33,83 @@ var sharedHTTPClient = &http.Client{
 }
 
 type EnhancedRouter struct {
-	// We hold the Radix Tree router which contains the logic closures.
 	Router *httprouter.Router
 	Wasm   *wasm.Manager
+}
+
+func NewEnhancedRouter(routes []ir.EnhancedRoute, wasm *wasm.Manager) *EnhancedRouter {
+	r := &EnhancedRouter{
+		Router: httprouter.New(),
+		Wasm:   wasm,
+	}
+
+	for _, route := range routes {
+		capturedRoute := route
+		cleanPath := utils.ConvertPath(strings.Join(capturedRoute.Path.Segments, "/"))
+		if !strings.HasPrefix(cleanPath, "/") {
+			cleanPath = "/" + cleanPath
+		}
+
+		log.Printf("Registering Route: %s %s", capturedRoute.Method, cleanPath)
+		r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+			r.handleRequest(w, req, ps, &capturedRoute)
+		})
+	}
+
+	return r
+}
+
+func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.Router.ServeHTTP(w, req)
+}
+
+func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request, params httprouter.Params, route *ir.EnhancedRoute) {
+	log.Printf("Matched route: %s %s", route.Method, req.URL.Path)
+
+	ctx := NewSafeContext()
+	for _, p := range params {
+		ctx.Set(p.Key, p.Value)
+	}
+
+	if err := r.runValidation(route, req); err != nil {
+		log.Printf("Validation failed: %v", err)
+		utils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := r.runTransformations(route, req, ctx); err != nil {
+		log.Printf("Transformation failed: %v", err)
+		utils.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	resp := make(map[string]any)
+	for _, rule := range route.Response {
+		if static, ok := rule.Source.(ir.StaticValue); ok {
+			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
+				finalVal := r.resolveTemplate(strVal, ctx)
+				utils.SetNested(resp, rule.Target, finalVal)
+				continue
+			}
+		}
+		val, err := rule.Source.Resolve(ctx)
+		if err != nil {
+			log.Printf("error resolving %s: %v", rule.Target, err)
+			val = "error: " + err.Error()
+		}
+		utils.SetNested(resp, rule.Target, val)
+	}
+
+	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
+		sleepTime := time.Duration(route.Delay.FixedMs) * time.Millisecond
+		if route.Delay.JitterMs > 0 {
+			randMs := time.Duration(rand.Intn(route.Delay.JitterMs)) * time.Millisecond
+			sleepTime += randMs
+		}
+		time.Sleep(sleepTime)
+	}
+
+	utils.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Request) error {
@@ -68,21 +141,17 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 			}
 
 		case "body":
-			// JSON Schema Validation
 			schemaMap, ok := step.Rules.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			// Read body
 			bodyBytes, err := io.ReadAll(req.Body)
 			if err != nil {
 				return fmt.Errorf("failed to read body")
 			}
-			// Restore body
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-			// Compile Schema
 			compiler := jsonschema.NewCompiler()
 			schemaJSON, _ := json.Marshal(schemaMap)
 			if err := compiler.AddResource("schema.json", bytes.NewReader(schemaJSON)); err != nil {
@@ -93,7 +162,6 @@ func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Reques
 				return fmt.Errorf("schema compile error: %v", err)
 			}
 
-			// Validate
 			var v interface{}
 			if err := json.Unmarshal(bodyBytes, &v); err != nil {
 				return fmt.Errorf("invalid json body")
@@ -133,11 +201,10 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 	if len(parts) == 2 {
 		source, key = parts[0], parts[1]
 	} else {
-		// Handle "body" whole extraction
 		source = parts[0]
 	}
 
-	var value any // Can be string or map/object
+	var value any
 	var valStr string
 
 	switch source {
@@ -153,11 +220,9 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 		valStr = req.URL.Query().Get(key)
 		value = valStr
 	case "body":
-		// Only support extracting full body as JSON for now
 		if req.Body != nil {
 			bodyBytes, _ := io.ReadAll(req.Body)
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
 			var jsonBody interface{}
 			if err := json.Unmarshal(bodyBytes, &jsonBody); err == nil {
 				value = jsonBody
@@ -175,8 +240,6 @@ func (r *EnhancedRouter) handleExtract(step ir.TransformStep, req *http.Request,
 	return nil
 }
 
-// handleHTTPBatch and performSingleHTTP remain mostly the same,
-// ensuring they use goccy/go-json and sharedHTTPClient...
 func (r *EnhancedRouter) handleHTTPBatch(step ir.TransformStep, ctx *SafeContext) error {
 	batchCfg, ok := step.Config.(ir.ParallelHTTPConfig)
 	if !ok {
@@ -236,18 +299,16 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 
 		if len(funcMatch) == 3 {
 			funcName := funcMatch[1]
-			// MEASURE EXECUTION
-			start := time.Now()
 			argVar := strings.TrimSpace(funcMatch[2])
 
 			if r.Wasm == nil {
 				return "[error: no user code]"
 			}
 
-			// Resolve argument
-			val := r.resolveVariable(argVar, ctx)
+			// For function args, we don't care if it was found or literal
+			val, _ := r.resolveVariable(argVar, ctx)
 
-			// Try Legacy Integer Strategy first (fastest)
+			// Strategy 1: Integer
 			strVal := fmt.Sprintf("%v", val)
 			if intVal, err := strconv.ParseUint(strVal, 10, 64); err == nil {
 				res, err := r.Wasm.Call(funcName, intVal)
@@ -257,127 +318,34 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 				return fmt.Sprintf("%d", res)
 			}
 
-			// Fallback to JSON/String Strategy (malloc/free)
-			// Marshal the input variable to JSON string
+			// Strategy 2: JSON String
 			jsonBytes, _ := json.Marshal(val)
 			jsonStr := string(jsonBytes)
-
-			// Remove quotes if it was just a string primitive to avoid double quoting "value"
 			if s, ok := val.(string); ok {
 				jsonStr = s
 			}
 
 			resStr, err := r.Wasm.CallJSON(funcName, jsonStr)
-			// Record Metric
-			// We assume we can access the API Name.
-			// Ideally, EnhancedRouter should store 'APIName' string field.
-			middleware.WasmDuration.WithLabelValues("dynamic_api", funcName).Observe(time.Since(start).Seconds())
 			if err != nil {
 				return fmt.Sprintf("[error: %v]", err)
 			}
 			return resStr
 		}
 
-		val := r.resolveVariable(content, ctx)
+		// 2. Variable Lookup
+		val, found := r.resolveVariable(content, ctx)
+		if !found {
+			// FIX: Return original template if not found
+			return match
+		}
 		return fmt.Sprintf("%v", val)
 	})
 }
 
-// NewEnhancedRouter creates and configures the Radix Tree
-func NewEnhancedRouter(routes []ir.EnhancedRoute, wasm *wasm.Manager) *EnhancedRouter {
-	r := &EnhancedRouter{
-		Router: httprouter.New(),
-		Wasm:   wasm,
-	}
-
-	// Compile the routes into the Radix Tree
-	for _, route := range routes {
-		// Capture variable for closure
-		capturedRoute := route
-
-		// 1. Convert path syntax: /users/{id} -> /users/:id
-		cleanPath := utils.ConvertPath(strings.Join(capturedRoute.Path.Segments, "/"))
-		// Ensure leading slash
-		if !strings.HasPrefix(cleanPath, "/") {
-			cleanPath = "/" + cleanPath
-		}
-
-		// 2. Register Handler
-		log.Printf("Registering Route: %s %s", capturedRoute.Method, cleanPath)
-		r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-			r.handleRequest(w, req, ps, &capturedRoute)
-		})
-	}
-
-	return r
-}
-
-// ServeHTTP simply delegates to the efficient httprouter
-func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	r.Router.ServeHTTP(w, req)
-}
-
-// handleRequest is the core logic (moved from old ServeHTTP)
-func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request, params httprouter.Params, route *ir.EnhancedRoute) {
-	log.Printf("Matched route: %s %s", route.Method, req.URL.Path)
-
-	ctx := NewSafeContext()
-
-	// Seed context with path parameters from httprouter
-	for _, p := range params {
-		ctx.Set(p.Key, p.Value)
-	}
-
-	// --- The rest of the logic is identical to your old ServeHTTP ---
-
-	// Phase 1: Validation
-	if err := r.runValidation(route, req); err != nil {
-		log.Printf("Validation failed: %v", err)
-		utils.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Phase 2: Transformation
-	if err := r.runTransformations(route, req, ctx); err != nil {
-		log.Printf("Transformation failed: %v", err)
-		utils.WriteError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Phase 3: Response building
-	resp := make(map[string]any)
-	for _, rule := range route.Response {
-		if static, ok := rule.Source.(ir.StaticValue); ok {
-			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
-				finalVal := r.resolveTemplate(strVal, ctx)
-				utils.SetNested(resp, rule.Target, finalVal)
-				continue
-			}
-		}
-		val, err := rule.Source.Resolve(ctx)
-		if err != nil {
-			log.Printf("error resolving %s: %v", rule.Target, err)
-			val = "error: " + err.Error()
-		}
-		utils.SetNested(resp, rule.Target, val)
-	}
-
-	// Phase 4: Latency
-	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
-		sleepTime := time.Duration(route.Delay.FixedMs) * time.Millisecond
-		if route.Delay.JitterMs > 0 {
-			randMs := time.Duration(rand.Intn(route.Delay.JitterMs)) * time.Millisecond
-			sleepTime += randMs
-		}
-		time.Sleep(sleepTime)
-	}
-
-	utils.WriteJSON(w, http.StatusOK, resp)
-}
-
-func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) any {
+// resolveVariable returns (value, found)
+func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) (any, bool) {
 	if val, ok := ctx.Get(key); ok {
-		return val
+		return val, true
 	}
 
 	if strings.Contains(key, ".") {
@@ -386,16 +354,17 @@ func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) any {
 			if root, ok := ctx.Get(parts[0]); ok {
 				if rootMap, ok := root.(map[string]any); ok {
 					if subVal, ok := rootMap[parts[1]]; ok {
-						return subVal
+						return subVal, true
 					}
 				}
 				if rootMap, ok := root.(map[string]interface{}); ok {
 					if subVal, ok := rootMap[parts[1]]; ok {
-						return subVal
+						return subVal, true
 					}
 				}
 			}
 		}
 	}
-	return key
+	// Return key as literal, but indicate it wasn't a context variable
+	return key, false
 }
