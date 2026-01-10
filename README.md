@@ -52,23 +52,66 @@ I mainly work with Python and C/C++. Go is new to me. I built this with support 
     ```
     *Server listens on port `:8080`.*
 
-## 🗄️ Full Stack Deployment (Recommended)
+Here is the updated text for your `README.md`. You can append these sections or replace the existing "Installation & Run" section to make it more comprehensive.
 
-To enable **Distributed Caching**, **Metrics**, and **Visualizations**, run the full stack using Docker Compose. This includes:
-*   **MinIO**: For storing compiled WASM binaries.
-*   **Prometheus**: For scraping metrics.
-*   **Grafana**: For visualizing dashboards.
+***
 
-1.  **Start the Stack:**
+## 🐳 Docker Compose (Full Stack)
+
+For the best experience, run the full stack including **MinIO** (Caching), **Prometheus** (Metrics), and **Grafana** (Dashboards).
+
+1.  **Prepare your environment:**
+    Ensure you have a `docker-compose.yml` and a `configs/` directory with at least one JSON config.
+
+2.  **Start the Stack:**
     ```bash
     docker-compose up -d
     ```
 
-2.  **Access Services:**
-    *   **Gateway**: `http://localhost:8080`
-    *   **Grafana**: `http://localhost:3000` (User: `admin` / Pass: `admin`)
-    *   **Prometheus**: `http://localhost:9091`
-    *   **MinIO**: `http://localhost:9001` (User: `admin` / Pass: `password`)
+3.  **Access Services:**
+
+| Service | URL | Credentials | Description |
+| :--- | :--- | :--- | :--- |
+| **Gateway** | `http://localhost:8080` | N/A | The API traffic entry point. |
+| **Metrics** | `http://localhost:9090` | N/A | Raw Prometheus metrics (Internal). |
+| **Grafana** | `http://localhost:3000` | `admin` / `admin` | Visual dashboards. |
+| **MinIO** | `http://localhost:9001` | `admin` / `password` | S3 Object Browser. |
+| **Prometheus** | `http://localhost:9091` | N/A | Metrics database UI. |
+
+4.  **Environment Variables:**
+    The gateway is configured via `docker-compose.yml`. Key variables include:
+
+    *   `MINIO_ENDPOINT`: Address of the S3 store (e.g., `minio:9000`).
+    *   `MINIO_ACCESS_KEY`: S3 Username.
+    *   `MINIO_SECRET_KEY`: S3 Password.
+
+***
+
+## 🏭 Production Guidelines
+
+When deploying MockingGOD to a production environment (Kubernetes, AWS ECS, DigitalOcean), follow these best practices to ensure security and stability.
+
+### 1. Security & Networking
+*   **Reverse Proxy (SSL/TLS):** MockingGOD serves HTTP. In production, place it behind **Nginx**, **Traefik**, or an **AWS ALB** to handle SSL termination (HTTPS).
+*   **Port Exposure:** Only expose port `8080` (Traffic) to the public. Keep ports `9090` (Metrics), `9000` (MinIO API), and `9001` (MinIO Console) inside your private network (VPC/Cluster IP).
+*   **Credentials:** Change the default MinIO `admin/password` credentials immediately. Use Docker Secrets or Kubernetes Secrets to inject them.
+*   **CORS:** While the included middleware permits `*` (all origins) for development convenience, you may want to restrict this to specific domains in the `internal/middleware/cors.go` logic for stricter environments.
+
+### 2. Resource Management
+*   **WASM Memory:** User code runs in a sandboxed runtime. While efficient, heavy usage requires RAM. Monitor the **Avg WASM Execution Time** in Grafana.
+    *   *Tip:* Adjust `max_instances` in your API config to prevent a single API from consuming all server memory.
+*   **CPU:** WASM compilation (on the first request/cache miss) is CPU intensive. Ensure your deployment has enough CPU burst capacity for startup/reloads.
+
+### 3. Storage & Caching
+*   **Persistence:** Ensure your MinIO container uses a **Persistent Volume**. If MinIO loses data, the Gateway will have to recompile all WASM binaries on the next restart (slower startup).
+*   **Shared Cache:** If running multiple replicas of MockingGOD (e.g., 5 pods in K8s), point them all to the **same MinIO instance**. This ensures that if one pod compiles the code, all other pods get the binary instantly from the cache.
+
+### 4. Observability
+*   **Golden Signals:** Use the provided Grafana dashboard to monitor **Request Rate**, **Error Rate**, and **Latency**.
+*   **Alerting:** Set up Prometheus alerts for:
+    *   High Error Rates (`status=5xx`).
+    *   WASM Timeouts (Execution time > configured `timeout_ms`).
+    *   Rate Limit Throttling (Spikes in `status=429`).
 
 ## ⚡ Quick Start
 
