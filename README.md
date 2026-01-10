@@ -6,8 +6,6 @@
 
 It is designed for scale and developer experience, featuring **zero-downtime hot-reloading**, **upstream proxying**, **parallel execution**, **distributed caching**, and **dynamic user code execution** via WebAssembly (WASM).
 
-A variation of this project serves as the core for [mocc.dev](http://mocc.dev). This is the open-source version.
-
 ## ⚠️ Important Note
 I mainly work with Python and C/C++. Go is new to me. I built this with support from AI assistants and online resources. Since this project has **user code execution** and **API chaining**, these features can be misused. If you plan to run untrusted code, use caution and double-check all code for exploits. It is recommended to run this in a restricted environment like Docker or a hardened kernel, behind a DMZ. This project is intended for demonstration and testing purposes.
 
