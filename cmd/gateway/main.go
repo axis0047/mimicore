@@ -84,8 +84,10 @@ func main() {
 
 	// Wrap the gateway with Metrics Middleware
 	// This ensures every request is counted and timed
-	handler := middleware.MetricsMiddleware(gateway)
-	handler = middleware.RateLimitMiddleware(handler) // <--- Add this
+
+	handler := middleware.MetricsMiddleware(gateway)  //APM
+	handler = middleware.RateLimitMiddleware(handler) //Rate Limitting
+	handler = middleware.CORSMiddleware(handler)      //CORS
 
 	log.Println("Gateway listening on :8080")
 	log.Printf("Reading configs from: %s", configDir)
