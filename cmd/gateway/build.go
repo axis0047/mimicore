@@ -176,9 +176,7 @@ func buildV2Handler(api config.APIConfig) (engine.APIHandler, error) {
 	}
 
 	// 6. Create Router
-	router := &engine.EnhancedRouter{
-		Routes: enhancedRoutes,
-		Wasm:   wasmMgr,
-	}
+	router := engine.NewEnhancedRouter(enhancedRoutes, wasmMgr)
+
 	return &engine.EnhancedIRHandler{Router: router}, nil
 }

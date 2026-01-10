@@ -14,14 +14,15 @@ import (
 	"time"
 
 	json "github.com/goccy/go-json"
+	"github.com/julienschmidt/httprouter"
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"golang.org/x/sync/errgroup"
 
 	v2 "github.com/axis0047/mockingGOD/internal/adapters/v2"
 	"github.com/axis0047/mockingGOD/internal/ir"
+	"github.com/axis0047/mockingGOD/internal/middleware"
 	"github.com/axis0047/mockingGOD/internal/services/wasm"
 	"github.com/axis0047/mockingGOD/internal/utils"
-    "github.com/axis0047/mockingGOD/internal/middleware"
 )
 
 var sharedHTTPClient = &http.Client{
@@ -33,85 +34,9 @@ var sharedHTTPClient = &http.Client{
 }
 
 type EnhancedRouter struct {
-	Routes []ir.EnhancedRoute
+	// We hold the Radix Tree router which contains the logic closures.
+	Router *httprouter.Router
 	Wasm   *wasm.Manager
-}
-
-func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	route, params := r.matchRoute(req)
-	if route == nil {
-		log.Printf("No route matched for %s %s", req.Method, req.URL.Path)
-		http.NotFound(w, req)
-		return
-	}
-
-	log.Printf("Matched route: %s %s", route.Method, strings.Join(route.Path.Segments, "/"))
-
-	ctx := NewSafeContext()
-	for k, v := range params {
-		ctx.Set(k, v)
-	}
-
-	// Phase 1: Validation (Header + Schema)
-	if err := r.runValidation(route, req); err != nil {
-		log.Printf("Validation failed: %v", err)
-		utils.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Phase 2: Transformation
-	if err := r.runTransformations(route, req, ctx); err != nil {
-		log.Printf("Transformation failed: %v", err)
-		utils.WriteError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Phase 3: Response building
-	resp := make(map[string]any)
-	for _, rule := range route.Response {
-		if static, ok := rule.Source.(ir.StaticValue); ok {
-			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
-				finalVal := r.resolveTemplate(strVal, ctx)
-				utils.SetNested(resp, rule.Target, finalVal)
-				continue
-			}
-		}
-		val, err := rule.Source.Resolve(ctx)
-		if err != nil {
-			log.Printf("error resolving %s: %v", rule.Target, err)
-			val = "error: " + err.Error()
-		}
-		utils.SetNested(resp, rule.Target, val)
-	}
-
-	// Phase 4: Latency Simulation
-	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
-		sleepTime := time.Duration(route.Delay.FixedMs) * time.Millisecond
-		if route.Delay.JitterMs > 0 {
-			randMs := time.Duration(rand.Intn(route.Delay.JitterMs)) * time.Millisecond
-			sleepTime += randMs
-		}
-		time.Sleep(sleepTime)
-	}
-
-	utils.WriteJSON(w, http.StatusOK, resp)
-}
-
-func (r *EnhancedRouter) matchRoute(req *http.Request) (*ir.EnhancedRoute, map[string]string) {
-	path := strings.Trim(req.URL.Path, "/")
-	segments := strings.Split(path, "/")
-
-	for i := range r.Routes {
-		route := &r.Routes[i]
-		if route.Method != req.Method {
-			continue
-		}
-		params := make(map[string]string)
-		if matchSegments(route.Path.Segments, segments, params) {
-			return route, params
-		}
-	}
-	return nil, nil
 }
 
 func (r *EnhancedRouter) runValidation(route *ir.EnhancedRoute, req *http.Request) error {
@@ -312,7 +237,7 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 		if len(funcMatch) == 3 {
 			funcName := funcMatch[1]
 			// MEASURE EXECUTION
-            start := time.Now()
+			start := time.Now()
 			argVar := strings.TrimSpace(funcMatch[2])
 
 			if r.Wasm == nil {
@@ -344,9 +269,9 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 
 			resStr, err := r.Wasm.CallJSON(funcName, jsonStr)
 			// Record Metric
-            // We assume we can access the API Name.
-            // Ideally, EnhancedRouter should store 'APIName' string field.
-            middleware.WasmDuration.WithLabelValues("dynamic_api", funcName).Observe(time.Since(start).Seconds())
+			// We assume we can access the API Name.
+			// Ideally, EnhancedRouter should store 'APIName' string field.
+			middleware.WasmDuration.WithLabelValues("dynamic_api", funcName).Observe(time.Since(start).Seconds())
 			if err != nil {
 				return fmt.Sprintf("[error: %v]", err)
 			}
@@ -356,6 +281,98 @@ func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) stri
 		val := r.resolveVariable(content, ctx)
 		return fmt.Sprintf("%v", val)
 	})
+}
+
+// NewEnhancedRouter creates and configures the Radix Tree
+func NewEnhancedRouter(routes []ir.EnhancedRoute, wasm *wasm.Manager) *EnhancedRouter {
+	r := &EnhancedRouter{
+		Router: httprouter.New(),
+		Wasm:   wasm,
+	}
+
+	// Compile the routes into the Radix Tree
+	for _, route := range routes {
+		// Capture variable for closure
+		capturedRoute := route
+
+		// 1. Convert path syntax: /users/{id} -> /users/:id
+		cleanPath := utils.ConvertPath(strings.Join(capturedRoute.Path.Segments, "/"))
+		// Ensure leading slash
+		if !strings.HasPrefix(cleanPath, "/") {
+			cleanPath = "/" + cleanPath
+		}
+
+		// 2. Register Handler
+		log.Printf("Registering Route: %s %s", capturedRoute.Method, cleanPath)
+		r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+			r.handleRequest(w, req, ps, &capturedRoute)
+		})
+	}
+
+	return r
+}
+
+// ServeHTTP simply delegates to the efficient httprouter
+func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.Router.ServeHTTP(w, req)
+}
+
+// handleRequest is the core logic (moved from old ServeHTTP)
+func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request, params httprouter.Params, route *ir.EnhancedRoute) {
+	log.Printf("Matched route: %s %s", route.Method, req.URL.Path)
+
+	ctx := NewSafeContext()
+
+	// Seed context with path parameters from httprouter
+	for _, p := range params {
+		ctx.Set(p.Key, p.Value)
+	}
+
+	// --- The rest of the logic is identical to your old ServeHTTP ---
+
+	// Phase 1: Validation
+	if err := r.runValidation(route, req); err != nil {
+		log.Printf("Validation failed: %v", err)
+		utils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Phase 2: Transformation
+	if err := r.runTransformations(route, req, ctx); err != nil {
+		log.Printf("Transformation failed: %v", err)
+		utils.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Phase 3: Response building
+	resp := make(map[string]any)
+	for _, rule := range route.Response {
+		if static, ok := rule.Source.(ir.StaticValue); ok {
+			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
+				finalVal := r.resolveTemplate(strVal, ctx)
+				utils.SetNested(resp, rule.Target, finalVal)
+				continue
+			}
+		}
+		val, err := rule.Source.Resolve(ctx)
+		if err != nil {
+			log.Printf("error resolving %s: %v", rule.Target, err)
+			val = "error: " + err.Error()
+		}
+		utils.SetNested(resp, rule.Target, val)
+	}
+
+	// Phase 4: Latency
+	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
+		sleepTime := time.Duration(route.Delay.FixedMs) * time.Millisecond
+		if route.Delay.JitterMs > 0 {
+			randMs := time.Duration(rand.Intn(route.Delay.JitterMs)) * time.Millisecond
+			sleepTime += randMs
+		}
+		time.Sleep(sleepTime)
+	}
+
+	utils.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (r *EnhancedRouter) resolveVariable(key string, ctx *SafeContext) any {
