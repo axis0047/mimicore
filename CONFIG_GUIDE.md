@@ -1,3 +1,5 @@
+***
+
 # MockingGOD V2 Configuration Guide
 
 This document describes the structure and parameters for the V2 API configuration files.
@@ -9,10 +11,25 @@ This document describes the structure and parameters for the V2 API configuratio
 | `api` | `string` | **Yes** | Unique ID. Maps to Host header (e.g., `api.localhost`). |
 | `mode` | `string` | **Yes** | `"ir"` (Mocking Engine) or `"proxy"`. |
 | `version` | `string` | **Yes** | Must be `"v2"`. |
+| `rate_limit` | `Object` | No | Traffic control settings. |
 | `user_code` | `Object` | No | Dynamic code settings. |
 | `routes` | `Array` | **Yes** | List of endpoint definitions. |
 
-## 2. User Code (WASM) Configuration
+## 2. Rate Limiting
+**Key:** `rate_limit`
+
+Protect your API from abuse using a Token Bucket algorithm.
+
+| Key | Type | Description |
+| :--- | :--- | :--- |
+| `requests_per_second` | `float` | The rate at which tokens are refilled. |
+| `burst` | `int` | The maximum capacity of the bucket (allows short bursts of traffic). |
+
+```json
+"rate_limit": { "requests_per_second": 10, "burst": 50 }
+```
+
+## 3. User Code (WASM) Configuration
 **Key:** `user_code`
 
 MockingGOD automatically handles memory allocation between Go and WASM. You simply write the logic.
@@ -26,9 +43,9 @@ MockingGOD automatically handles memory allocation between Go and WASM. You simp
 ### How to write User Code
 1.  **Integers:** Use `func add(x, y uint64) uint64`. Call via `{{add(var1, var2)}}`.
 2.  **Strings/JSON:** Use `func process(ptr *byte, size uint32) uint64`. Call via `{{process(var_json)}}`.
-    *   *Note:* The system automatically injects `_guest_alloc` helpers. You do not need to write `malloc` yourself anymore.
+    *   *Note:* The system automatically injects `_guest_alloc` helpers. You do not need to write `malloc` yourself.
 
-## 3. Route Configuration
+## 4. Route Configuration
 
 | Key | Description |
 | :--- | :--- |
@@ -37,7 +54,7 @@ MockingGOD automatically handles memory allocation between Go and WASM. You simp
 | `delay` | Network latency simulation. |
 | `response` | The response definition. |
 
-### 3.1 Validation
+### 4.1 Validation
 **Key:** `validate`
 
 *   **Headers/Query:** Regex pattern matching.
@@ -56,7 +73,7 @@ MockingGOD automatically handles memory allocation between Go and WASM. You simp
 }
 ```
 
-### 3.2 Latency Simulation
+### 4.2 Latency Simulation
 **Key:** `delay`
 
 Simulate network issues before sending the response.
@@ -68,7 +85,7 @@ Simulate network issues before sending the response.
 "delay": { "fixed_ms": 200, "jitter_ms": 100 }
 ```
 
-### 3.3 Transformation
+### 4.3 Transformation
 **Key:** `transform`
 
 *   **Extract:** Pull data from `path`, `query`, `header`, or `body`.
@@ -84,7 +101,7 @@ Simulate network issues before sending the response.
 }
 ```
 
-### 3.4 Response
+### 4.4 Response
 **Key:** `response`
 
 Use `{{ }}` templates to inject data from extraction, upstream calls, or WASM results.
@@ -101,15 +118,19 @@ Use `{{ }}` templates to inject data from extraction, upstream calls, or WASM re
 
 ---
 
-## 4. Full Example: Advanced Logic
+## 5. Full Example: Advanced Logic
 
-This example validates a user via JSON schema, extracts the body, simulates network lag, and processes the JSON using inline Go code.
+This example includes rate limiting, schema validation, latency simulation, and inline JSON processing.
 
 ```json
 {
   "api": "advanced_api",
   "mode": "ir",
   "version": "v2",
+  "rate_limit": {
+    "requests_per_second": 5,
+    "burst": 10
+  },
   "user_code": {
     "timeout_ms": 500,
     "inline_source": "package main\nimport (\n\t\"encoding/json\"\n\t\"unsafe\"\n)\n\ntype User struct { Name string `json:\"name\"` }\ntype Resp struct { Msg string `json:\"msg\"` }\n\n//export greet\nfunc greet(ptr *byte, size uint32) uint64 {\n\t// Boilerplate to read string\n\tbytes := unsafe.Slice(ptr, size)\n\tvar u User\n\tjson.Unmarshal(bytes, &u)\n\t\n\t// Logic\n\tr := Resp{Msg: \"Hello \" + u.Name}\n\tout, _ := json.Marshal(r)\n\t\n\t// Boilerplate to return string\n\tlen := uint32(len(out))\n\tptrOut := uintptr(unsafe.Pointer(&out[0]))\n\treturn (uint64(ptrOut) << 32) | uint64(len)\n}\nfunc main() {}"

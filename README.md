@@ -1,3 +1,5 @@
+***
+
 # 🌀 MockingGOD
 
 **MockingGOD** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution.
@@ -18,18 +20,18 @@ I mainly work with Python and C/C++. Go is new to me. I built this with support 
 *   **High Performance**: Uses `goccy/go-json` for fast parsing and a global connection pool for low-latency HTTP chaining.
 
 ### Advanced Capabilities
-*   **Dynamic User Code (WASM)**: Write Go code directly in your JSON. It is compiled to WASM on-the-fly and executed in a sandboxed, pooled runtime (Wazero). Supports complex JSON manipulation.
+*   **Dynamic User Code (WASM)**: Write Go code directly in your JSON. It is compiled to WASM on-the-fly and executed in a sandboxed, pooled runtime (Wazero).
 *   **Distributed Caching (S3/MinIO)**: Compiled WASM binaries are hashed and stored in S3/MinIO. This enables instant startup for clusters and prevents "thundering herd" compilation spikes.
+*   **Observability**: Built-in **Prometheus** metrics (`/metrics`) tracking RPS, Latency, and WASM execution time.
+*   **Traffic Control**: Integrated **Rate Limiting** (Token Bucket) and **CORS** middleware to protect the gateway.
 *   **Robust Validation**: Full support for **JSON Schema** validation for request bodies, plus Regex patterns for Headers/Query params.
-*   **Network Simulation**: Built-in support for **Fixed Latency** and **Jitter** to simulate real-world network conditions.
-*   **Garbage Collection**: Automatically cleans up orphaned WASM binaries from object storage.
+*   **Network Simulation**: Built-in support for **Fixed Latency** and **Jitter**.
 
 ## 🛠️ Prerequisites
 
 *   **Go 1.22+**
-*   **TinyGo**: Required for the Dynamic Compiler service (to compile inline Go code to WASM).
-    *   [Install TinyGo Instructions](https://tinygo.org/getting-started/install/)
-*   **Docker** (Optional): Recommended for running MinIO (S3 Cache).
+*   **TinyGo**: Required for the Dynamic Compiler service.
+*   **Docker & Docker Compose**: Recommended for running the full stack (Gateway + MinIO + Prometheus + Grafana).
 
 ## 📦 Installation & Run
 
@@ -44,45 +46,43 @@ I mainly work with Python and C/C++. Go is new to me. I built this with support 
     go mod tidy
     ```
 
-3.  **Start the Gateway** (Standard Mode)
+3.  **Start the Gateway** (Standalone Mode)
     ```bash
     go run cmd/gateway/*.go
     ```
     *Server listens on port `:8080`.*
 
-## 🗄️ S3/MinIO Integration (Recommended)
+## 🗄️ Full Stack Deployment (Recommended)
 
-To enable **Distributed Caching** (skipping compilation on restart) and **Garbage Collection**, run a MinIO instance.
+To enable **Distributed Caching**, **Metrics**, and **Visualizations**, run the full stack using Docker Compose. This includes:
+*   **MinIO**: For storing compiled WASM binaries.
+*   **Prometheus**: For scraping metrics.
+*   **Grafana**: For visualizing dashboards.
 
-1.  **Start MinIO in Docker:**
+1.  **Start the Stack:**
     ```bash
-    docker run -d -p 9000:9000 -p 9001:9001 \
-      --name minio \
-      -e "MINIO_ROOT_USER=admin" \
-      -e "MINIO_ROOT_PASSWORD=password" \
-      minio/minio server /data --console-address ":9001"
+    docker-compose up -d
     ```
 
-2.  **Start Gateway with Environment Variables:**
-    ```bash
-    export MINIO_ENDPOINT="localhost:9000"
-    export MINIO_ACCESS_KEY="admin"
-    export MINIO_SECRET_KEY="password"
-    
-    go run cmd/gateway/*.go
-    ```
-
-*On startup, the Gateway will check the bucket for existing WASM binaries matching the code hash. If found, it skips compilation. This is useful for auto scaling or relevant tasks*
+2.  **Access Services:**
+    *   **Gateway**: `http://localhost:8080`
+    *   **Grafana**: `http://localhost:3000` (User: `admin` / Pass: `admin`)
+    *   **Prometheus**: `http://localhost:9091`
+    *   **MinIO**: `http://localhost:9001` (User: `admin` / Pass: `password`)
 
 ## ⚡ Quick Start
 
-1.  Create a configuration file `configs/my_api.json`. Note the use of `inline_source` for custom logic.
+1.  Create a configuration file `configs/my_api.json`.
 
     ```json
     {
       "api": "my_api",
       "mode": "ir",
       "version": "v2",
+      "rate_limit": {
+        "requests_per_second": 10,
+        "burst": 20
+      },
       "user_code": {
         "inline_source": "package main\n\n//export double\nfunc double(x uint64) uint64 { return x * 2 }\n\nfunc main() {}",
         "timeout_ms": 100
@@ -134,7 +134,13 @@ graph TD
     Builder --> Registry[Handler Registry]
     
     Gateway -- "Host Matching" --> Registry
-    Registry -- "Get Handler" --> V2Engine
+    Registry -- "Get Handler" --> Middleware
+    
+    subgraph Middleware [Middleware Chain]
+        Metrics --> CORS --> RateLimiter
+    end
+    
+    RateLimiter --> V2Engine
     
     subgraph V2Engine [Parallel Request Lifecycle]
         Validation[JSON Schema / Headers] --> Transformation
@@ -159,6 +165,7 @@ graph TD
 │   ├── config/            # Loader & Version Detection
 │   ├── engine/            # Core Runtime (Router, HTTP, Validation, SafeContext)
 │   ├── ir/                # Intermediate Representation Definitions
+│   ├── middleware/        # Rate Limiting, CORS, and Prometheus Metrics
 │   ├── services/
 │   │   ├── compiler/      # Dynamic TinyGo Compiler & Hash Logic
 │   │   ├── storage/       # S3/MinIO Client
@@ -168,11 +175,11 @@ graph TD
 
 ## 📚 Documentation
 
-For a detailed guide on the JSON structure, including **JSON Schema Validation**, **WASM String/JSON processing**, and **Delay configuration**, please see the **[Configuration Guide](CONFIG_GUIDE.md)**.
+For a detailed guide on all available configuration parameters, please see the **[Configuration Guide](CONFIG_GUIDE.md)**.
 
 ## 🧪 Testing
 
-Run unit tests and the End-to-End (E2E) test suite which compiles a real binary and hits it with requests, Use test/ branches for this:
+Run unit tests and the End-to-End (E2E) test suite which compiles a real binary and hits it with requests:
 
 ```bash
 go test ./... -v
