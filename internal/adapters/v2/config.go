@@ -77,9 +77,15 @@ type UserCodeConfig struct {
 }
 
 type APIFileConfig struct {
-	API      string          `json:"api"`
-	Mode     string          `json:"mode"`
-	Version  string          `json:"version"`
-	UserCode *UserCodeConfig `json:"user_code,omitempty"`
-	Routes   []V2RouteConfig `json:"routes"`
+	API       string           `json:"api"`
+	Mode      string           `json:"mode"`
+	Version   string           `json:"version"`
+	UserCode  *UserCodeConfig  `json:"user_code,omitempty"`
+	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"` // NEW
+	Routes    []V2RouteConfig  `json:"routes"`
+}
+
+type RateLimitConfig struct {
+	RequestsPerSecond float64 `json:"requests_per_second"`
+	Burst             int     `json:"burst"`
 }
