@@ -2,63 +2,112 @@
 
 # MockingGOD V2 Configuration Guide
 
-This document describes the structure and parameters for the V2 API configuration files.
+This document is the definitive reference for configuring APIs in MockingGOD. The configuration file uses JSON format.
 
-## 1. Root Configuration
+## 1. Root Structure
+
+Every configuration file represents one API service (Virtual Host).
+
+```json
+{
+  "api": "payment_service",
+  "mode": "ir",
+  "version": "v2",
+  "rate_limit": { ... },
+  "user_code": { ... },
+  "routes": [ ... ]
+}
+```
 
 | Key | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `api` | `string` | **Yes** | Unique ID. Maps to Host header (e.g., `api.localhost`). |
-| `mode` | `string` | **Yes** | `"ir"` (Mocking Engine) or `"proxy"`. |
-| `version` | `string` | **Yes** | Must be `"v2"`. |
-| `rate_limit` | `Object` | No | Traffic control settings. |
-| `user_code` | `Object` | No | Dynamic code settings. |
-| `routes` | `Array` | **Yes** | List of endpoint definitions. |
+| `api` | `string` | **Yes** | The unique ID. Traffic is routed via the Host header: `{api}.localhost` or `{api}.local`. |
+| `mode` | `string` | **Yes** | `"ir"` (Mocking Engine) or `"proxy"` (Unix Socket pass-through). |
+| `version` | `string` | **Yes** | Must be `"v2"` to use features listed below. |
+| `rate_limit`| `Object` | No | Traffic control settings (Token Bucket). |
+| `user_code` | `Object` | No | Dynamic WASM compilation settings. |
+| `routes` | `Array` | **Yes** | List of endpoint logic. |
 
-## 2. Rate Limiting
+---
+
+## 2. Traffic Control (Rate Limiting)
 **Key:** `rate_limit`
 
-Protect your API from abuse using a Token Bucket algorithm.
+Protects the gateway from abuse using a local **Token Bucket** algorithm.
 
 | Key | Type | Description |
 | :--- | :--- | :--- |
-| `requests_per_second` | `float` | The rate at which tokens are refilled. |
-| `burst` | `int` | The maximum capacity of the bucket (allows short bursts of traffic). |
+| `requests_per_second` | `float` | The refill rate of tokens. |
+| `burst` | `int` | Maximum tokens allowed at once. Allows sudden spikes. |
 
+**Example:**
 ```json
-"rate_limit": { "requests_per_second": 10, "burst": 50 }
+"rate_limit": { "requests_per_second": 50, "burst": 100 }
 ```
+*Effect: Allows 100 immediate requests, then throttles to 50 req/s. Returns `429 Too Many Requests` when exceeded.*
 
-## 3. User Code (WASM) Configuration
+---
+
+## 3. Dynamic User Code (WASM)
 **Key:** `user_code`
 
-MockingGOD automatically handles memory allocation between Go and WASM. You simply write the logic.
+MockingGOD includes a built-in compiler (TinyGo). It accepts raw Go code strings, compiles them to WebAssembly, caches them in S3/MinIO, and runs them in a sandboxed pool.
+
+**Memory Management:** The system automatically injects memory helpers (`_guest_alloc`). You do not need to write `malloc` manually.
 
 | Key | Description |
 | :--- | :--- |
-| `inline_source` | Raw Golang code. **Must be escaped** (`\n`). Requires `package main`. |
-| `timeout_ms` | Max execution time per function call. |
-| `min_instances` | Number of hot WASM instances to keep in the pool. |
+| `inline_source` | Raw Golang code. **Must be escaped** (`\n` for newlines, `\"` for quotes). Requires `package main`. |
+| `timeout_ms` | Max execution time per function. Prevents infinite loops. |
+| `min_instances` | Number of "hot" WASM instances to keep ready in the pool. |
+| `max_instances` | Hard limit on concurrent WASM executions. |
 
-### How to write User Code
-1.  **Integers:** Use `func add(x, y uint64) uint64`. Call via `{{add(var1, var2)}}`.
-2.  **Strings/JSON:** Use `func process(ptr *byte, size uint32) uint64`. Call via `{{process(var_json)}}`.
-    *   *Note:* The system automatically injects `_guest_alloc` helpers. You do not need to write `malloc` yourself.
+### 3.1 Writing Logic (Go)
 
-## 4. Route Configuration
+**Pattern A: Integer Math (Fastest)**
+Signature: `func name(x, y uint64) uint64`
+Config Usage: `{{name(var1, var2)}}`
 
+**Pattern B: String/JSON Processing (Powerful)**
+Signature: `func name(ptr *byte, size uint32) uint64`
+Config Usage: `{{name(json_var)}}`
+
+*Boilerplate for Pattern B:*
+```go
+import ("encoding/json"; "unsafe")
+
+//export my_func
+func my_func(ptr *byte, size uint32) uint64 {
+    // 1. Read Input
+    inBytes := unsafe.Slice(ptr, size)
+    // ... process data ...
+    
+    // 2. Write Output
+    outBytes := []byte("result string or json")
+    
+    // 3. Return Pointer/Length packed into uint64
+    len := uint32(len(outBytes))
+    ptrOut := uintptr(unsafe.Pointer(&outBytes[0]))
+    return (uint64(ptrOut) << 32) | uint64(len)
+}
+```
+
+---
+
+## 4. Route Definition
+**Key:** `routes` (Array)
+
+### 4.1 Matching
 | Key | Description |
 | :--- | :--- |
-| `validate` | Input validation rules. |
-| `transform` | Data extraction and Upstream calls. |
-| `delay` | Network latency simulation. |
-| `response` | The response definition. |
+| `method` | HTTP Method (`GET`, `POST`, `PUT`, `DELETE`, etc). |
+| `path` | URL Path. Use `{param}` for dynamic variables. Example: `/users/{id}/details`. |
 
-### 4.1 Validation
-**Key:** `validate`
+### 4.2 Validation (`validate`)
+Returns `400 Bad Request` if rules fail.
 
-*   **Headers/Query:** Regex pattern matching.
-*   **Body:** **Full JSON Schema** support.
+*   **Headers / Query:** Key-value pairs. Supports `required` (bool) and `pattern` (Regex string).
+*   **Body:** Supports full **JSON Schema**.
 
 ```json
 "validate": {
@@ -66,97 +115,181 @@ MockingGOD automatically handles memory allocation between Go and WASM. You simp
   "body": {
     "schema": {
       "type": "object",
-      "required": ["age"],
-      "properties": { "age": { "type": "integer", "minimum": 18 } }
+      "required": ["sku", "qty"],
+      "properties": { "qty": { "type": "integer", "minimum": 1 } }
     }
   }
 }
 ```
 
-### 4.2 Latency Simulation
-**Key:** `delay`
+### 4.3 Network Simulation (`delay`)
+Simulates network lag before sending the response.
 
-Simulate network issues before sending the response.
+*   `fixed_ms`: Base latency.
+*   `jitter_ms`: Random added latency (0 to N milliseconds).
 
-*   `fixed_ms`: Base delay in milliseconds.
-*   `jitter_ms`: Random additional delay (0 to `jitter_ms`).
+### 4.4 Transformation (`transform`)
+Prepares the **Data Context** for the response.
+
+**A. Extract (`extract`)**
+Pulls data into variables.
+*   `from`: Source (`path.x`, `query.x`, `header.x`, or `body` for full JSON).
+*   `as`: Variable name used in templates.
+
+**B. HTTP Chaining (`http`)**
+Calls upstream services.
+*   **Parallelism:** All calls in the `http` array run **concurrently** via `errgroup`.
+*   **Context:** Results are stored in variables defined by `name`.
 
 ```json
-"delay": { "fixed_ms": 200, "jitter_ms": 100 }
+"http": [
+  { "name": "user_data", "url": "http://api.com/users/{{id}}", "method": "GET" }
+]
 ```
 
-### 4.3 Transformation
-**Key:** `transform`
+### 4.5 Response (`response`)
+Constructs the final output using Templating `{{ }}`.
 
-*   **Extract:** Pull data from `path`, `query`, `header`, or `body`.
-*   **HTTP:** Make upstream calls. **Note:** All HTTP calls in this list run in **PARALLEL**.
+*   **Variable Injection:** `{{extracted_var}}`
+*   **Nested Access:** `{{user_data.address.city}}`
+*   **WASM Call:** `{{my_func(extracted_body)}}`
+
+---
+
+## 5. Comprehensive Example
+
+This example configuration demonstrates a **Pre-Order Validation Service**.
+1.  **Protects** itself with Rate Limiting.
+2.  **Validates** the JSON body schema and Auth header.
+3.  **Simulates** a 200ms DB latency.
+4.  **Fetches** exchange rates from an external API.
+5.  **Calculates** the final price with tax using **Custom Go Logic (WASM)**.
+
+### `configs/api_comprehensive.json`
 
 ```json
-"transform": {
-  "extract": { "my_input": { "from": "body", "as": "input_json" } },
-  "http": [
-    { "name": "service_a", "url": "http://a.com", "method": "GET" },
-    { "name": "service_b", "url": "http://b.com", "method": "GET" }
+{
+  "api": "shop_api",
+  "mode": "ir",
+  "version": "v2",
+  "rate_limit": {
+    "requests_per_second": 50,
+    "burst": 100
+  },
+  "user_code": {
+    "timeout_ms": 1000,
+    "min_instances": 2,
+    "max_instances": 20,
+    "inline_source": "package main\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"unsafe\"\n)\n\ntype Order struct {\n\tPrice float64 `json:\"price\"`\n\tTax   float64 `json:\"tax_percent\"`\n}\n\n//export calculate_total\nfunc calculate_total(ptr *byte, size uint32) uint64 {\n\t// 1. Read JSON\n\tbytes := unsafe.Slice(ptr, size)\n\tvar o Order\n\tjson.Unmarshal(bytes, &o)\n\n\t// 2. Logic\n\ttotal := o.Price + (o.Price * o.Tax / 100.0)\n\tres := fmt.Sprintf(\"%.2f\", total)\n\n\t// 3. Return String\n\tout := []byte(res)\n\tlen := uint32(len(out))\n\tptrOut := uintptr(unsafe.Pointer(&out[0]))\n\treturn (uint64(ptrOut) << 32) | uint64(len)\n}\nfunc main() {}"
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/checkout/{region}",
+      "validate": {
+        "headers": {
+          "Authorization": { "required": true, "pattern": "^Bearer sk_live_.*" }
+        },
+        "query": {
+          "currency": { "required": true, "pattern": "^(USD|EUR)$" }
+        },
+        "body": {
+          "schema": {
+            "type": "object",
+            "required": ["price", "tax_percent", "items"],
+            "properties": {
+              "price": { "type": "number", "minimum": 0 },
+              "tax_percent": { "type": "number", "maximum": 50 },
+              "items": { "type": "array" }
+            }
+          }
+        }
+      },
+      "delay": {
+        "fixed_ms": 200,
+        "jitter_ms": 50
+      },
+      "transform": {
+        "extract": {
+          "reg": { "from": "path.region", "as": "region_code" },
+          "curr": { "from": "query.currency", "as": "currency_code" },
+          "raw": { "from": "body", "as": "order_body" }
+        },
+        "http": [
+          {
+            "name": "forex",
+            "url": "https://api.exchangerate-api.com/v4/latest/USD",
+            "method": "GET",
+            "timeout": 2000
+          }
+        ]
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-Processed-By": "MockingGOD-WASM"
+        },
+        "body": {
+          "region": "{{region_code}}",
+          "currency": "{{currency_code}}",
+          "exchange_rate": "{{forex.rates.EUR}}",
+          "final_amount": "{{calculate_total(order_body)}}",
+          "status": "approved"
+        }
+      }
+    }
   ]
-}
-```
-
-### 4.4 Response
-**Key:** `response`
-
-Use `{{ }}` templates to inject data from extraction, upstream calls, or WASM results.
-
-```json
-"response": {
-  "status": 200,
-  "body": {
-    "data_a": "{{service_a.data}}",
-    "calculated": "{{my_wasm_func(input_json)}}"
-  }
 }
 ```
 
 ---
 
-## 5. Full Example: Advanced Logic
+## 6. Testing Commands
 
-This example includes rate limiting, schema validation, latency simulation, and inline JSON processing.
+Use these curls to verify the configuration above.
 
-```json
-{
-  "api": "advanced_api",
-  "mode": "ir",
-  "version": "v2",
-  "rate_limit": {
-    "requests_per_second": 5,
-    "burst": 10
-  },
-  "user_code": {
-    "timeout_ms": 500,
-    "inline_source": "package main\nimport (\n\t\"encoding/json\"\n\t\"unsafe\"\n)\n\ntype User struct { Name string `json:\"name\"` }\ntype Resp struct { Msg string `json:\"msg\"` }\n\n//export greet\nfunc greet(ptr *byte, size uint32) uint64 {\n\t// Boilerplate to read string\n\tbytes := unsafe.Slice(ptr, size)\n\tvar u User\n\tjson.Unmarshal(bytes, &u)\n\t\n\t// Logic\n\tr := Resp{Msg: \"Hello \" + u.Name}\n\tout, _ := json.Marshal(r)\n\t\n\t// Boilerplate to return string\n\tlen := uint32(len(out))\n\tptrOut := uintptr(unsafe.Pointer(&out[0]))\n\treturn (uint64(ptrOut) << 32) | uint64(len)\n}\nfunc main() {}"
-  },
-  "routes": [
-    {
-      "method": "POST",
-      "path": "/greet",
-      "validate": {
-        "body": {
-          "schema": {
-            "type": "object",
-            "required": ["name"],
-            "properties": { "name": { "type": "string" } }
-          }
-        }
-      },
-      "delay": { "fixed_ms": 150 },
-      "transform": {
-        "extract": { "raw": { "from": "body", "as": "input_json" } }
-      },
-      "response": {
-        "status": 200,
-        "body": { "result": "{{greet(input_json)}}" }
-      }
-    }
-  ]
-}
+**1. Success Scenario**
+Should return `200 OK` after ~200ms.
+*(Note: Requires internet access for the external forex API call)*.
+
+```bash
+curl -v -X POST \
+  -H "Host:shop_api.local" \
+  -H "Authorization: Bearer sk_live_12345" \
+  -H "Content-Type: application/json" \
+  -d '{"price": 100, "tax_percent": 20, "items": ["apple"]}' \
+  "http://localhost:8080/checkout/EU?currency=EUR"
+```
+
+**2. Validation Error (Schema)**
+Sends invalid `price` type. Should return `400 Bad Request`.
+
+```bash
+curl -v -X POST \
+  -H "Host:shop_api.local" \
+  -H "Authorization: Bearer sk_live_12345" \
+  -d '{"price": "free", "tax_percent": 20, "items": []}' \
+  "http://localhost:8080/checkout/EU?currency=EUR"
+```
+
+**3. Validation Error (Header)**
+Sends wrong Auth format. Should return `400 Bad Request`.
+
+```bash
+curl -v -X POST \
+  -H "Host:shop_api.local" \
+  -H "Authorization: Basic 123" \
+  "http://localhost:8080/checkout/EU?currency=EUR"
+```
+
+**4. Rate Limit Test**
+Spam the endpoint to trigger the Token Bucket limit (Burst 100).
+
+```bash
+for i in {1..150}; do 
+  curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Host:shop_api.local" \
+  -H "Authorization: Bearer sk_live_X" \
+  "http://localhost:8080/checkout/US?currency=USD" &
+done
 ```
