@@ -1,8 +1,8 @@
 ***
 
-# 🌀 MockingGOD
+# 🌀 MIMICORE
 
-**MockingGOD** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution.
+**MIMICORE** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution.
 
 It is designed for scale and developer experience, featuring **zero-downtime hot-reloading**, **upstream proxying**, **parallel execution**, **distributed caching**, and **dynamic user code execution** via WebAssembly (WASM).
 
@@ -35,8 +35,8 @@ I mainly work with Python and C/C++. Go is new to me. I built this with support 
 
 1.  **Clone the repository**
     ```bash
-    git clone https://github.com/axis0047/mockingGOD.git
-    cd mockingGOD
+    git clone https://github.com/axis0047/mimicore.git
+    cd mimicore
     ```
 
 2.  **Install Dependencies**
