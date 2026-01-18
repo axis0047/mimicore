@@ -1,6 +1,6 @@
 ***
 
-# 🌀 MIMICORE
+# 🐦‍🔥 MIMICORE
 
 **MIMICORE** is a high-performance, declarative API Gateway and API Mocking Platform written in Go. It uses an **Intermediate Representation (IR)** engine to decouple configuration from execution.
 
