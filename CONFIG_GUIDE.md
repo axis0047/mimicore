@@ -1,6 +1,6 @@
 ***
 
-# MockingGOD V2 Configuration Guide
+# Mimicore V2 Configuration Guide (previously MockingGOD)
 
 This document is the definitive reference for configuring APIs in MockingGOD. The configuration file uses JSON format.
 
