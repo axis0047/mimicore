@@ -20,7 +20,7 @@ env:
   REGISTRY: ghcr.io
   # IMPORTANT: Replace these with your actual GitHub username and repository name.
   # Docker strictly requires this entire string to be LOWERCASE.
-  IMAGE_NAME: your_lowercase_username/your_lowercase_repo
+  IMAGE_NAME: axis0047/mimicore
 
 jobs:
   build:
