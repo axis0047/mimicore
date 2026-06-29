@@ -1,4 +1,6 @@
 configs
+CLAUDE.local.md
+.claude/settings.local.json
 combined_output.txt
 file_concat.sh
 coverage.out
