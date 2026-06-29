@@ -1,0 +1,19 @@
+# golangci-lint configuration (v2 schema).
+# Install: https://golangci-lint.run/welcome/install/  ·  Run: golangci-lint run ./...
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Defaults already include errcheck, govet, ineffassign, staticcheck, unused.
+  enable:
+    - misspell     # common spelling mistakes in comments/strings
+    - revive       # fast, configurable style/lint rules (golint successor)
+    - unconvert    # redundant type conversions
+    - bodyclose    # ensures HTTP response bodies are closed (relevant: proxy + http chaining)
+    - errorlint    # correct error wrapping/comparison
+
+formatters:
+  enable:
+    - gofmt

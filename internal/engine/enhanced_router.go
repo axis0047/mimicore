@@ -85,19 +85,13 @@ func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request,
 
 	resp := make(map[string]any)
 	for _, rule := range route.Response {
-		if static, ok := rule.Source.(ir.StaticValue); ok {
-			if strVal, isStr := static.Value.(string); isStr && strings.Contains(strVal, "{{") {
-				finalVal := r.resolveTemplate(strVal, ctx)
-				utils.SetNested(resp, rule.Target, finalVal)
-				continue
-			}
-		}
 		val, err := rule.Source.Resolve(ctx)
 		if err != nil {
 			log.Printf("error resolving %s: %v", rule.Target, err)
 			val = "error: " + err.Error()
 		}
-		utils.SetNested(resp, rule.Target, val)
+		// Resolve {{...}} templates at any depth (nested objects, arrays).
+		utils.SetNested(resp, rule.Target, r.resolveDeep(val, ctx))
 	}
 
 	if route.Delay.FixedMs > 0 || route.Delay.JitterMs > 0 {
@@ -286,6 +280,34 @@ func (r *EnhancedRouter) performSingleHTTP(cfg ir.HTTPTransform, ctx *SafeContex
 	}
 	ctx.Set(cfg.Name, result)
 	return nil
+}
+
+// resolveDeep walks a response value and resolves {{...}} templates at any
+// depth (nested objects and arrays). It returns freshly-built structures so the
+// shared config-backed StaticValue map is never mutated (it is read concurrently
+// across requests).
+func (r *EnhancedRouter) resolveDeep(v any, ctx *SafeContext) any {
+	switch val := v.(type) {
+	case string:
+		if strings.Contains(val, "{{") {
+			return r.resolveTemplate(val, ctx)
+		}
+		return val
+	case map[string]any: // also matches map[string]interface{} (type alias)
+		out := make(map[string]any, len(val))
+		for k, e := range val {
+			out[k] = r.resolveDeep(e, ctx)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, e := range val {
+			out[i] = r.resolveDeep(e, ctx)
+		}
+		return out
+	default:
+		return val
+	}
 }
 
 func (r *EnhancedRouter) resolveTemplate(template string, ctx *SafeContext) string {
