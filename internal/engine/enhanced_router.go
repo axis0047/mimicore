@@ -51,9 +51,24 @@ func NewEnhancedRouter(routes []ir.EnhancedRoute, wasm *wasm.Manager) *EnhancedR
 		}
 
 		log.Printf("Registering Route: %s %s", capturedRoute.Method, cleanPath)
-		r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-			r.handleRequest(w, req, ps, &capturedRoute)
-		})
+
+		// httprouter panics (instead of returning an error) when a route can't be
+		// inserted into its radix tree — most commonly when a static segment
+		// collides with an existing wildcard at the same position, e.g.
+		// "/fixtures/date/:date" vs an existing "/fixtures/:fixture_id". The
+		// conflict check fires before the tree is mutated, so recovering here
+		// leaves the already-registered routes intact and simply skips the
+		// offending one rather than crashing the entire gateway at startup.
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("WARNING: skipping conflicting route %s %s: %v", capturedRoute.Method, cleanPath, rec)
+				}
+			}()
+			r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+				r.handleRequest(w, req, ps, &capturedRoute)
+			})
+		}()
 	}
 
 	return r
