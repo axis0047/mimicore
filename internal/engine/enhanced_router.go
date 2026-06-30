@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	json "github.com/goccy/go-json"
-	"github.com/julienschmidt/httprouter"
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	"golang.org/x/sync/errgroup"
 
@@ -33,41 +33,42 @@ var sharedHTTPClient = &http.Client{
 }
 
 type EnhancedRouter struct {
-	Router *httprouter.Router
+	Router chi.Router
 	Wasm   *wasm.Manager
 }
 
 func NewEnhancedRouter(routes []ir.EnhancedRoute, wasm *wasm.Manager) *EnhancedRouter {
 	r := &EnhancedRouter{
-		Router: httprouter.New(),
+		Router: chi.NewRouter(),
 		Wasm:   wasm,
 	}
 
 	for _, route := range routes {
 		capturedRoute := route
-		cleanPath := utils.ConvertPath(strings.Join(capturedRoute.Path.Segments, "/"))
+		// chi uses the same "{param}" placeholder syntax as our config segments,
+		// so the path is registered as-is (no ":param" conversion needed). Unlike
+		// httprouter, chi lets a static segment and a wildcard share a position —
+		// e.g. "/fixtures/date/{date}" alongside "/fixtures/{fixture_id}" — and
+		// prefers the more specific static match at request time.
+		cleanPath := strings.Join(capturedRoute.Path.Segments, "/")
 		if !strings.HasPrefix(cleanPath, "/") {
 			cleanPath = "/" + cleanPath
 		}
 
 		log.Printf("Registering Route: %s %s", capturedRoute.Method, cleanPath)
 
-		// httprouter panics (instead of returning an error) when a route can't be
-		// inserted into its radix tree — most commonly when a static segment
-		// collides with an existing wildcard at the same position, e.g.
-		// "/fixtures/date/:date" vs an existing "/fixtures/:fixture_id". The
-		// conflict check fires before the tree is mutated, so recovering here
-		// leaves the already-registered routes intact and simply skips the
-		// offending one rather than crashing the entire gateway at startup.
+		// Keep the recover guard: chi still panics on a genuinely malformed
+		// pattern or an unknown HTTP method, and one bad route must not bring
+		// down the whole gateway at startup.
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Printf("WARNING: skipping conflicting route %s %s: %v", capturedRoute.Method, cleanPath, rec)
+					log.Printf("WARNING: skipping invalid route %s %s: %v", capturedRoute.Method, cleanPath, rec)
 				}
 			}()
-			r.Router.Handle(capturedRoute.Method, cleanPath, func(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
-				r.handleRequest(w, req, ps, &capturedRoute)
-			})
+			r.Router.Method(capturedRoute.Method, cleanPath, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				r.handleRequest(w, req, &capturedRoute)
+			}))
 		}()
 	}
 
@@ -78,12 +79,15 @@ func (r *EnhancedRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.Router.ServeHTTP(w, req)
 }
 
-func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request, params httprouter.Params, route *ir.EnhancedRoute) {
+func (r *EnhancedRouter) handleRequest(w http.ResponseWriter, req *http.Request, route *ir.EnhancedRoute) {
 	log.Printf("Matched route: %s %s", route.Method, req.URL.Path)
 
 	ctx := NewSafeContext()
-	for _, p := range params {
-		ctx.Set(p.Key, p.Value)
+	// Seed path parameters captured by chi (e.g. {fixture_id}) into the context.
+	if rctx := chi.RouteContext(req.Context()); rctx != nil {
+		for i, key := range rctx.URLParams.Keys {
+			ctx.Set(key, rctx.URLParams.Values[i])
+		}
 	}
 
 	if err := r.runValidation(route, req); err != nil {
